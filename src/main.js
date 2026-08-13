@@ -727,6 +727,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         if (showWaterController && showWaterController.updateDisplay) showWaterController.updateDisplay();
         if (debugWaterDropdownController && debugWaterDropdownController.updateDisplay) debugWaterDropdownController.updateDisplay();
         if (editorWaterDropdownController && editorWaterDropdownController.updateDisplay) editorWaterDropdownController.updateDisplay();
+        if (window._updateShaderCycleBtn) window._updateShaderCycleBtn();
 
         setWaterMaterialMode(params.waterMode);
 
@@ -992,6 +993,35 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     });
 
 
+
+    // Water shader cycle button — steps through all available shader modes
+    {
+        const shaderModes = [
+            { key: 'realistic',     label: '🌊 Realistic' },
+            { key: 'anime',         label: '🎨 Anime' },
+            { key: 'windWaker',     label: '⛵ Wind Waker' },
+            { key: 'windWakerDeep', label: '🌊 WW Deep' },
+            { key: 'toon06',        label: '✨ Toon Hard' },
+            { key: 'toon07',        label: '🌀 Toon Ripple' },
+            { key: 'toon08',        label: '☁️ Toon Cloud' },
+        ];
+        const shaderBtn = document.getElementById('shader-cycle-btn');
+        function updateShaderBtn() {
+            const idx = shaderModes.findIndex(m => m.key === params.waterMode);
+            const mode = shaderModes[idx >= 0 ? idx : 0];
+            shaderBtn.textContent = mode.label;
+            shaderBtn.title = 'Water shader: ' + mode.label.replace(/^.\s/, '') + ' — click to cycle';
+        }
+        shaderBtn.addEventListener('click', () => {
+            const idx = shaderModes.findIndex(m => m.key === params.waterMode);
+            const next = shaderModes[(idx + 1) % shaderModes.length];
+            activateWaterShader(next.key, true);
+            updateShaderBtn();
+        });
+        updateShaderBtn();
+        // Keep label in sync if changed from the GUI dropdown
+        window._updateShaderCycleBtn = updateShaderBtn;
+    }
 
     const clickRaycaster = new THREE.Raycaster();
     const clickMouse = new THREE.Vector2();
