@@ -1300,10 +1300,61 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     gradientMap.magFilter = THREE.NearestFilter;
     gradientMap.generateMipmaps = false;
 
+    // Cloud-specific gradient: cool blue-gray shadow → warm white highlight
+    const cloudGradientColors = new Uint8Array([
+        120, 145, 175, 255, // Cool blue-gray underside shadow
+        255, 252, 240, 255  // Warm white sunlit top
+    ]);
+    const cloudGradientMap = new THREE.DataTexture(cloudGradientColors, 2, 1, THREE.RGBAFormat);
+    cloudGradientMap.needsUpdate = true;
+    cloudGradientMap.minFilter = THREE.NearestFilter;
+    cloudGradientMap.magFilter = THREE.NearestFilter;
+    cloudGradientMap.generateMipmaps = false;
+
+    // Shared sun direction reference for cloud gradient shaders (updated each frame)
+    const cloudSunDirRef = new THREE.Vector3(-0.077, 0.5, 0.577).normalize();
+
+    function applyCloudGradient(mat) {
+        mat.onBeforeCompile = (shader) => {
+            shader.uniforms.uCloudSunDir = { value: cloudSunDirRef };
+            shader.uniforms.uCloudShadowTint = { value: new THREE.Color(0x8ab0cc) };
+            // Pass object-space normal Y so we can determine top vs bottom of each cloud
+            shader.vertexShader = shader.vertexShader.replace(
+                'void main() {',
+                `varying float vCloudNormalY;
+                void main() {`
+            ).replace(
+                '#include <beginnormal_vertex>',
+                `#include <beginnormal_vertex>
+                vCloudNormalY = objectNormal.y;`
+            );
+            shader.fragmentShader = shader.fragmentShader.replace(
+                'void main() {',
+                `varying float vCloudNormalY;
+                uniform vec3 uCloudSunDir;
+                uniform vec3 uCloudShadowTint;
+                void main() {`
+            ).replace(
+                '#include <dithering_fragment>',
+                `#include <dithering_fragment>
+                // Three-tone vertical gradient: shadow underside → midtone → bright sunlit top
+                float normalY = clamp(vCloudNormalY * 0.5 + 0.5, 0.0, 1.0);
+                float shadowBlend = smoothstep(0.28, 0.62, normalY);
+                float highlightBlend = smoothstep(0.68, 0.92, normalY);
+                gl_FragColor.rgb = mix(uCloudShadowTint, gl_FragColor.rgb, shadowBlend);
+                gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * 1.16, highlightBlend);
+                `
+            );
+            mat.userData.cloudShader = shader;
+        };
+    }
+
     const matRock = new THREE.MeshToonMaterial({ color: 0xffffff, gradientMap, dithering: true });
     const matBush = new THREE.MeshToonMaterial({ color: 0x48a868, gradientMap, dithering: true });
-    const matCloud = new THREE.MeshToonMaterial({ color: 0xfffaec, transparent: true, opacity: 1.0, gradientMap, dithering: true });
-    const matWispyCloud = new THREE.MeshToonMaterial({ color: 0xffffff, transparent: true, opacity: 1.0, gradientMap, dithering: true });
+    const matCloud = new THREE.MeshToonMaterial({ color: 0xfffaec, transparent: true, opacity: 1.0, gradientMap: cloudGradientMap, dithering: true });
+    applyCloudGradient(matCloud);
+    const matWispyCloud = new THREE.MeshToonMaterial({ color: 0xffffff, transparent: true, opacity: 1.0, gradientMap: cloudGradientMap, dithering: true });
+    applyCloudGradient(matWispyCloud);
     const matFlower = new THREE.MeshToonMaterial({ color: 0xffffff, gradientMap, dithering: true });
     function createSandNoiseTexture(size = 256) {
         const data = new Uint8Array(size * size * 4);
@@ -2433,7 +2484,8 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
 
     const highCloudGeo = BufferGeometryUtils.mergeGeometries(baseCloudSpheres);
     highCloudGeo.computeVertexNormals();
-    const highCloudMat = new THREE.MeshToonMaterial({ color: 0xffffff, transparent: true, opacity: 1.0 });
+    const highCloudMat = new THREE.MeshToonMaterial({ color: 0xffffff, transparent: true, opacity: 1.0, gradientMap: cloudGradientMap });
+    applyCloudGradient(highCloudMat);
     
     const MAX_HIGH_CLOUD_COUNT = 100;
     const instHighClouds = new THREE.InstancedMesh(highCloudGeo, highCloudMat, MAX_HIGH_CLOUD_COUNT);
@@ -2449,7 +2501,8 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
 
     // Far-Distance Mega Painted Clouds (Visible when Kiki climbs high)
     const MAX_MEGA_CLOUD_COUNT = 100;
-    const megaCloudMat = new THREE.MeshToonMaterial({ color: 0xfff6e3, transparent: true, opacity: 1.0 });
+    const megaCloudMat = new THREE.MeshToonMaterial({ color: 0xfff6e3, transparent: true, opacity: 1.0, gradientMap: cloudGradientMap });
+    applyCloudGradient(megaCloudMat);
     const instMegaClouds = new THREE.InstancedMesh(highCloudGeo, megaCloudMat, MAX_MEGA_CLOUD_COUNT);
     instMegaClouds.count = MEGA_CLOUD_COUNT;
     instMegaClouds.frustumCulled = false;
@@ -2504,6 +2557,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             uCloudHeight: { value: 800.0 },
             uSkyColor: { value: new THREE.Color(0x8cbce6) },
             uCloudColor: { value: new THREE.Color(0xfffaec) },
+            uCloudShadowColor: { value: new THREE.Color(0x7898b8) },
             uEnableClouds: { value: 1.0 }
         },
         vertexShader: `
@@ -2523,6 +2577,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             uniform float uCloudHeight;
             uniform vec3 uSkyColor;
             uniform vec3 uCloudColor;
+            uniform vec3 uCloudShadowColor;
             uniform float uEnableClouds;
 
             varying vec3 vWorldPos;
@@ -2562,7 +2617,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
 
                 vec3 dir = normalize(vViewDir);
                 float rayT = (uCloudHeight - cameraPosition.y) / max(dir.y, 0.01);
-                
+
                 if (rayT <= 0.0 || rayT > 16000.0) {
                     discard;
                 }
@@ -2574,13 +2629,38 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
                     discard;
                 }
 
-                float alpha = smoothstep(0.05, 0.45, cloudDensity);
-                float diff = clamp(dot(vec3(0.0, 1.0, 0.0), uSunDir), 0.5, 1.0);
-                
-                vec3 col = mix(uSkyColor, uCloudColor, alpha);
-                col = mix(col, uCloudColor * 1.15, diff * 0.3);
+                // Multi-sample for fake ambient occlusion / depth shading
+                float cloudAbove = getCloud(pos + vec3(0.0, 80.0, 0.0));
+                float cloudBelow = getCloud(pos - vec3(0.0, 55.0, 0.0));
 
-                gl_FragColor = vec4(col, alpha * 0.95);
+                // Fake AO: density above & below creates self-shadowing
+                float ao = (1.0 - cloudAbove * 0.55) * (1.0 - cloudBelow * 0.35);
+
+                float alpha = smoothstep(0.05, 0.5, cloudDensity);
+
+                // Sun phase: looking toward sun gives warm scatter at cloud edges
+                float sunDot = clamp(dot(dir, uSunDir), 0.0, 1.0);
+                float scatter = pow(sunDot, 4.0) * (1.0 - cloudDensity * 0.8) * 0.6;
+
+                // Silver lining: thin bright rim when cloud edge faces sun
+                float silverLining = pow(sunDot, 10.0) * smoothstep(0.45, 0.1, cloudDensity);
+
+                // Three-tone cel-shade: shadow → mid → highlight
+                vec3 shadowCol = mix(uCloudShadowColor, uSkyColor * 0.55, 0.25);
+                float shadeLow  = smoothstep(0.2, 0.5, ao);
+                float shadeHigh = smoothstep(0.6, 0.85, ao);
+                vec3 col = mix(shadowCol, uCloudColor, shadeLow);
+                col = mix(col, uCloudColor * 1.22, shadeHigh);
+
+                // Sun scatter warmth at backlit edges
+                col += uCloudColor * 0.35 * scatter;
+                // Silver lining glow
+                col = mix(col, vec3(1.0, 0.97, 0.88) * 1.6, silverLining * 0.7);
+
+                // Blend cloud into sky at soft edges
+                col = mix(uSkyColor, col, alpha);
+
+                gl_FragColor = vec4(col, alpha * 0.93);
             }
         `
     });
@@ -4867,6 +4947,29 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         if (typeof highCloudMat !== 'undefined') highCloudMat.color.lerp(tempColorTarget.setHex(target.cloudCol), decayEnv);
         if (typeof megaCloudMat !== 'undefined') megaCloudMat.color.lerp(tempColorTarget.setHex(target.cloudCol), decayEnv);
         if (typeof matWispyCloud !== 'undefined') matWispyCloud.color.lerp(tempColorTarget.setHex(target.cloudCol), decayEnv);
+
+        // Sync volumetric cloud shader with live sun direction, sky color, and cloud color
+        if (typeof toonCloudMat !== 'undefined') {
+            toonCloudMat.uniforms.uSunDir.value.copy(dirLight.position).normalize();
+            toonCloudMat.uniforms.uSkyColor.value.lerp(tempColorTarget.setHex(target.bg), decayEnv);
+            toonCloudMat.uniforms.uCloudColor.value.lerp(tempColorTarget.setHex(target.cloudCol), decayEnv);
+            // Shadow color transitions: day=cool blue-gray, dusk=warm purple-brown, night=deep navy
+            const volShadowHex = (timePhase === 2) ? 0x1e2e50 : (timePhase === 1) ? 0x7a4a50 : 0x6888aa;
+            toonCloudMat.uniforms.uCloudShadowColor.value.lerp(tempColorTarget.setHex(volShadowHex), decayEnv);
+            toonCloudMat.uniforms.uTime.value = time;
+        }
+        // Sync cloudSunDirRef for mesh cloud gradient shaders
+        if (typeof cloudSunDirRef !== 'undefined') {
+            cloudSunDirRef.copy(dirLight.position).normalize();
+            // Update shadow tint on mesh cloud compiled shaders per time of day
+            const meshShadowHex = (timePhase === 2) ? 0x283860 : (timePhase === 1) ? 0x9a6050 : 0x8ab0cc;
+            const meshShadowColor = tempColorTarget.setHex(meshShadowHex);
+            [matCloud, matWispyCloud, highCloudMat, megaCloudMat].forEach(m => {
+                if (m && m.userData && m.userData.cloudShader) {
+                    m.userData.cloudShader.uniforms.uCloudShadowTint.value.lerp(meshShadowColor, decayEnv);
+                }
+            });
+        }
         
         // Dynamically scale up the terrain and water as Kiki flies high
         terrainScale = 1.0 + Math.min(1.0, Math.max(0.0, (playerGrp.position.y - 300.0) / 11700.0)) * 9.0;
