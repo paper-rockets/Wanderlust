@@ -367,7 +367,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         showWater: true,
         showTrees: true,
         showClouds: true,
-        showCloudsRegular: true,
+        showCloudsRegular: false,
         showCloudsHigh: true,
         showCloudsWispy: true,
         showCloudsMega: true,
@@ -686,8 +686,6 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     envFolder.add(params, 'wind').name('Wind').onChange(v => { if(isWindOn !== v) document.getElementById('wind-toggle').click(); });
     envFolder.add(params, 'rain').name('Rain').onChange(v => { isRainOn = v; if(typeof rainSystem !== 'undefined') rainSystem.visible = v; });
     envFolder.add(params, 'fogPlane').name('Ground Fog').onChange(v => { if(typeof window.fogGroup !== 'undefined') window.fogGroup.visible = v; });
-    envFolder.add(params, 'godRays').name('God Rays').onChange(v => { godRaysPass.enabled = v; });
-    envFolder.add(params, 'godRayIntensity', 0, 2, 0.05).name('Ray Intensity').onChange(v => { godRaysPass.uniforms.uIntensity.value = v; });
     envFolder.add(params, 'trails').name('Wind Trails').onChange(v => isWindTrailsOn = v);
 
 
@@ -2458,6 +2456,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
 
     instClouds.castShadow = true;
     instClouds.frustumCulled = false;
+    instClouds.visible = false; // off by default; toggled via Cloud Editor
     scene.add(instClouds);
 
     // Super High Cumulonimbus Clouds & See-Through Wispy Clouds
@@ -5460,6 +5459,9 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         });
 
         const atmoFolder = gui.addFolder('Atmosphere');
+        // God Rays — placed at top of Atmosphere for quick access
+        atmoFolder.add(params, 'godRays').name('God Rays').onChange(v => { godRaysPass.enabled = v; });
+        atmoFolder.add(params, 'godRayIntensity', 0, 2, 0.05).name('Ray Intensity').onChange(v => { godRaysPass.uniforms.uIntensity.value = v; });
         atmoFolder.addColor(atmoParams, 'skyColor').name('Sky Color').onChange(v => envConfigs[timePhase].bg = parseInt(v.replace('#',''), 16));
         atmoFolder.addColor(atmoParams, 'fogColor').name('Fog Color').onChange(v => envConfigs[timePhase].fog = parseInt(v.replace('#',''), 16));
         atmoFolder.addColor(atmoParams, 'ambColor').name('Ambient Light').onChange(v => envConfigs[timePhase].amb = parseInt(v.replace('#',''), 16));
@@ -5553,7 +5555,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             oldCloudColors[idx] = newHexVal;
         }
 
-        const cloudFolder = gui.addFolder('☁️ Cloud Editor');
+        const cloudFolder = atmoFolder.addFolder('☁️ Cloud Editor');
         
         // Show All Clouds Toggle
         cloudFolder.add(params, 'showClouds').name('Show All Clouds').onChange(v => {
@@ -5712,6 +5714,15 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         treeFolder.addColor(params, 'treeColor4').name('Color 5').onChange(v => updateTreeColorForIndex(4, v));
         treeFolder.addColor(params, 'treeColor5').name('Color 6').onChange(v => updateTreeColorForIndex(5, v));
         treeFolder.addColor(params, 'treeColor6').name('Color 7').onChange(v => updateTreeColorForIndex(6, v));
+
+        // Move Atmosphere folder to just after Performance in the GUI panel
+        {
+            const perfEl = perfFolder.domElement;
+            const atmoEl = atmoFolder.domElement;
+            if (perfEl && atmoEl && perfEl.parentElement && perfEl.parentElement === atmoEl.parentElement) {
+                perfEl.parentElement.insertBefore(atmoEl, perfEl.nextSibling);
+            }
+        }
 
         // ==========================================
         // SYSTEM SETTINGS (SAVE/LOAD)
