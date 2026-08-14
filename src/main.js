@@ -1035,7 +1035,7 @@ import { postProcessing as composer, initPostProcessing, bloomPass, godRaysPass,
     window.addEventListener('wheel', (e) => {
         if ((window.editorState && window.editorState.isEditorMode) || isGodMode) return;
         cameraZoomDist += Math.sign(e.deltaY) * 4.0;
-        cameraZoomDist = Math.max(0.5, Math.min(100.0, cameraZoomDist));
+        cameraZoomDist = Math.max(5.0, Math.min(300.0, cameraZoomDist));
         if (cameraManager) cameraManager.setZoom(cameraZoomDist);
     }, { passive: true });
     
@@ -3776,7 +3776,7 @@ import { postProcessing as composer, initPostProcessing, bloomPass, godRaysPass,
             const newDist = Math.sqrt(dx*dx + dy*dy);
             
             cameraZoomDist = initialZoomDist * (initialPinchDist / newDist);
-            cameraZoomDist = Math.max(5.0, Math.min(100.0, cameraZoomDist));
+            cameraZoomDist = Math.max(5.0, Math.min(300.0, cameraZoomDist));
             
             const zoomToggleBtn = document.getElementById('zoom-toggle');
             if (zoomToggleBtn) {
