@@ -68,22 +68,21 @@ export const createWaterNodeMaterial = (uTime) => {
     waterMat.colorNode = Fn(() => {
         const baseColor = color(new THREE.Color(0x4da9e8)).toVar();
 
-        const uv = positionWorld.xz.mul(0.1);
-        const n1 = float(1.0).sub(abs(snoise2D(uv.add(vec2(uTime.mul(0.1), uTime.mul(0.05))))));
-        const n2 = float(1.0).sub(abs(snoise2D(uv.mul(1.5).sub(vec2(uTime.mul(0.15), uTime.mul(-0.05))))));
+        // High-fidelity continuous anime caustics
+        const uv = positionWorld.xz.mul(0.08);
+        const n1 = float(1.0).sub(abs(snoise2D(uv.add(vec2(uTime.mul(0.08), uTime.mul(0.04))))));
+        const n2 = float(1.0).sub(abs(snoise2D(uv.mul(1.6).sub(vec2(uTime.mul(0.12), uTime.mul(-0.04))))));
+        const caustics = clamp(pow(n1, float(5.0)).add(pow(n2, float(5.0)).mul(0.5)), float(0.0), float(1.0));
 
-        const rawCaustics = pow(n1, float(6.0)).add(pow(n2, float(6.0)).mul(0.5));
+        // Soft luminous foam ripples
+        const foamColor = vec3(0.92, 0.97, 1.0);
+        baseColor.rgb.assign(mix(baseColor.rgb, foamColor, caustics.mul(0.42)));
 
-        const simpleTerrainH = snoise2D(positionWorld.xz.mul(0.003)).mul(15.0);
-        const deepWater = smoothstep(float(-0.5), float(-4.0), simpleTerrainH);
-
-        const caustics = clamp(rawCaustics, float(0.0), float(1.0)).mul(deepWater);
-
-        baseColor.rgb.assign(mix(baseColor.rgb, vec3(0.9, 0.95, 1.0), caustics.mul(0.5)));
-
+        // Gentle smooth atmospheric horizon blend
         const dist = length(positionWorld.xz.sub(cameraPosition.xz));
-        const depthFade = smoothstep(float(50.0), float(450.0), dist);
-        baseColor.rgb.assign(mix(baseColor.rgb, baseColor.rgb.mul(0.65), depthFade));
+        const horizonFade = smoothstep(float(3000.0), float(12000.0), dist);
+        const horizonWaterColor = vec3(0.22, 0.55, 0.82);
+        baseColor.rgb.assign(mix(baseColor.rgb, horizonWaterColor, horizonFade.mul(0.4)));
 
         return baseColor;
     })();

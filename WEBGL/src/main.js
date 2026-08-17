@@ -2852,20 +2852,21 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             shader.fragmentShader = shader.fragmentShader.replace(
                 `#include <color_fragment>`,
                 `#include <color_fragment>
-                 vec2 uv = vWorldPos.xz * 0.1;
-                 float n1 = 1.0 - abs(snoise(uv + vec2(uTime * 0.1, uTime * 0.05)));
-                 float n2 = 1.0 - abs(snoise(uv * 1.5 - vec2(uTime * 0.15, -uTime * 0.05)));
-                 float caustics = pow(n1, 6.0) + pow(n2, 6.0) * 0.5;
+                 // High-fidelity continuous anime caustics
+                 vec2 uv = vWorldPos.xz * 0.08;
+                 float n1 = 1.0 - abs(snoise(uv + vec2(uTime * 0.08, uTime * 0.04)));
+                 float n2 = 1.0 - abs(snoise(uv * 1.6 - vec2(uTime * 0.12, -uTime * 0.04)));
+                 float caustics = clamp(pow(n1, 5.0) + pow(n2, 5.0) * 0.5, 0.0, 1.0);
 
-                 float simpleTerrainH = snoise(vWorldPos.xz * 0.003) * 15.0;
-                 float deepWater = smoothstep(-0.5, -4.0, simpleTerrainH); 
-                 
-                 caustics = clamp(caustics, 0.0, 1.0) * deepWater;
-                 diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.9, 0.95, 1.0), caustics * 0.5);
+                 // Soft luminous foam ripples
+                 vec3 foamColor = vec3(0.92, 0.97, 1.0);
+                 diffuseColor.rgb = mix(diffuseColor.rgb, foamColor, caustics * 0.42);
 
+                 // Gentle smooth atmospheric horizon blend
                  float dist = length(vWorldPos.xz - cameraPosition.xz);
-                 float depthFade = smoothstep(50.0, 450.0, dist);
-                 diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * 0.65, depthFade);
+                 float horizonFade = smoothstep(3000.0, 12000.0, dist);
+                 vec3 horizonWaterColor = vec3(0.22, 0.55, 0.82);
+                 diffuseColor.rgb = mix(diffuseColor.rgb, horizonWaterColor, horizonFade * 0.4);
                 `
             );
         }
@@ -3722,7 +3723,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             if (params.showTrees) {
                 const playerInJungle = getBiomeAt(focusX, focusZ).name.toLowerCase().includes('jungle');
                 let treeSpawnAttemptsThisFrame = 0;
-                const MAX_TREE_SPAWN_ATTEMPTS = 50;
+                const MAX_TREE_SPAWN_ATTEMPTS = 25;
 
                 // 1. Update standard pine trees (activePineModels)
                 if (activePineModels && activePineModels.length > 0) {
@@ -3753,36 +3754,35 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
                                 let attempts = 0;
 
                                 if (!playerInJungle && treesPossibleNearby) {
-                                    while(!valid && attempts < 12 && treeSpawnAttemptsThisFrame < MAX_TREE_SPAWN_ATTEMPTS) {
-                                        nx = focusX + (Math.random() - 0.5) * dense3dRadius * 2.0;
-                                        nz = focusZ + (Math.random() - 0.5) * dense3dRadius * 2.0;
-                                        h = getWorldHeight(nx, nz);
-                                        pathVal = getPathStrength(nx, nz);
-                                        bName = getBiomeAt(nx, nz).name;
-
-                                        let isForest = true;
-                                        let biomeMatch = !bName.toLowerCase().includes('jungle') && !bName.includes('Crystal Land') && !bName.includes('Desert') && !bName.includes('Canyon') && !bName.includes('North Pole') && !bName.includes('Misty');
-                                        let islandMaskOk = (getIslandData(nx, nz).mask >= 0.35);
-                                        let elevationValid = (h >= 6.8 && h <= 55.0) && islandMaskOk;
-
-                                        if (isForest && elevationValid && pathVal < 0.20 && isTreeZone(nx, nz) && biomeMatch) {
-                                            let cx = Math.floor(nx / TREE_CELL_SIZE);
-                                            let cz = Math.floor(nz / TREE_CELL_SIZE);
-                                            let tooClose = false;
-                                            for (let dx = -1; dx <= 1 && !tooClose; dx++) {
-                                                for (let dz = -1; dz <= 1 && !tooClose; dz++) {
-                                                    const ncx = (cx + dx + 32768) & 0xFFFF;
-                                                    const ncz = (cz + dz + 32768) & 0xFFFF;
-                                                    let neighbor = treeGrid.get((ncx << 16) | ncz);
-                                                    if (neighbor) {
-                                                        if ((neighbor.x - nx)**2 + (neighbor.z - nz)**2 < 20) tooClose = true;
-                                                    }
-                                                }
-                                            }
-                                            if (!tooClose) valid = true;
-                                        }
+                                    while(!valid && attempts < 8 && treeSpawnAttemptsThisFrame < MAX_TREE_SPAWN_ATTEMPTS) {
                                         attempts++;
                                         treeSpawnAttemptsThisFrame++;
+                                        nx = focusX + (Math.random() - 0.5) * dense3dRadius * 2.0;
+                                        nz = focusZ + (Math.random() - 0.5) * dense3dRadius * 2.0;
+                                        
+                                        const b = getBiomeAt(nx, nz);
+                                        if (!b.treesOk) continue;
+                                        bName = b.name;
+                                        if (bName.toLowerCase().includes('jungle') || bName.includes('Crystal Land') || bName.includes('Desert') || bName.includes('Canyon') || bName.includes('North Pole') || bName.includes('Misty')) continue;
+
+                                        if (getIslandData(nx, nz).mask < 0.35) continue;
+                                        if (getPathStrength(nx, nz) >= 0.20) continue;
+
+                                        h = getWorldHeight(nx, nz);
+                                        if (h < 6.8 || h > 55.0) continue;
+
+                                        let cx = Math.floor(nx / TREE_CELL_SIZE);
+                                        let cz = Math.floor(nz / TREE_CELL_SIZE);
+                                        let tooClose = false;
+                                        for (let dx = -1; dx <= 1 && !tooClose; dx++) {
+                                            for (let dz = -1; dz <= 1 && !tooClose; dz++) {
+                                                const ncx = (cx + dx + 32768) & 0xFFFF;
+                                                const ncz = (cz + dz + 32768) & 0xFFFF;
+                                                let neighbor = treeGrid.get((ncx << 16) | ncz);
+                                                if (neighbor && ((neighbor.x - nx)**2 + (neighbor.z - nz)**2 < 20)) tooClose = true;
+                                            }
+                                        }
+                                        if (!tooClose) valid = true;
                                     }
                                 }
 
@@ -3835,38 +3835,35 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
                             let attempts = 0;
 
                             if (treesPossibleNearby) {
-                                while(!valid && attempts < 12 && treeSpawnAttemptsThisFrame < MAX_TREE_SPAWN_ATTEMPTS) {
-                                    nx = focusX + (Math.random() - 0.5) * dense3dRadius * 2.0;
-                                    nz = focusZ + (Math.random() - 0.5) * dense3dRadius * 2.0;
-                                    h = getWorldHeight(nx, nz);
-                                    pathVal = getPathStrength(nx, nz);
-                                    bName = getBiomeAt(nx, nz).name;
-
-                                    let isForest = true;
-                                    let biomeMatch = bName.includes('Jungle');
-                                    let islandMaskOk = (getIslandData(nx, nz).mask >= 0.35);
-                                    
-                                    // Jungle trees spawn all the way up the canopy hills!
-                                    let elevationValid = (h >= 6.8 && h <= 110.0) && islandMaskOk;
-
-                                    if (isForest && elevationValid && pathVal < 0.20 && isTreeZone(nx, nz) && biomeMatch) {
-                                        let cx = Math.floor(nx / TREE_CELL_SIZE);
-                                        let cz = Math.floor(nz / TREE_CELL_SIZE);
-                                        let tooClose = false;
-                                        for (let dx = -1; dx <= 1 && !tooClose; dx++) {
-                                            for (let dz = -1; dz <= 1 && !tooClose; dz++) {
-                                                const ncx = (cx + dx + 32768) & 0xFFFF;
-                                                const ncz = (cz + dz + 32768) & 0xFFFF;
-                                                let neighbor = treeGrid.get((ncx << 16) | ncz);
-                                                if (neighbor) {
-                                                    if ((neighbor.x - nx)**2 + (neighbor.z - nz)**2 < 36) tooClose = true;
-                                                }
-                                            }
-                                        }
-                                        if (!tooClose) valid = true;
-                                    }
+                                while(!valid && attempts < 8 && treeSpawnAttemptsThisFrame < MAX_TREE_SPAWN_ATTEMPTS) {
                                     attempts++;
                                     treeSpawnAttemptsThisFrame++;
+                                    nx = focusX + (Math.random() - 0.5) * dense3dRadius * 2.0;
+                                    nz = focusZ + (Math.random() - 0.5) * dense3dRadius * 2.0;
+
+                                    const b = getBiomeAt(nx, nz);
+                                    if (!b.treesOk) continue;
+                                    bName = b.name;
+                                    if (!bName.includes('Jungle')) continue;
+
+                                    if (getIslandData(nx, nz).mask < 0.35) continue;
+                                    if (getPathStrength(nx, nz) >= 0.20) continue;
+
+                                    h = getWorldHeight(nx, nz);
+                                    if (h < 6.8 || h > 110.0) continue;
+
+                                    let cx = Math.floor(nx / TREE_CELL_SIZE);
+                                    let cz = Math.floor(nz / TREE_CELL_SIZE);
+                                    let tooClose = false;
+                                    for (let dx = -1; dx <= 1 && !tooClose; dx++) {
+                                        for (let dz = -1; dz <= 1 && !tooClose; dz++) {
+                                            const ncx = (cx + dx + 32768) & 0xFFFF;
+                                            const ncz = (cz + dz + 32768) & 0xFFFF;
+                                            let neighbor = treeGrid.get((ncx << 16) | ncz);
+                                            if (neighbor && ((neighbor.x - nx)**2 + (neighbor.z - nz)**2 < 36)) tooClose = true;
+                                        }
+                                    }
+                                    if (!tooClose) valid = true;
                                 }
                             }
 

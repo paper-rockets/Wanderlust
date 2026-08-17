@@ -1253,8 +1253,10 @@ initMapUI();
             terrainGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3));
         }
         const colors = terrainGeo.attributes.color;
+        const norm = terrainGeo.attributes.normal;
 
-        for (let i = 0; i < pos.count; i++) {
+        const count = pos.count;
+        for (let i = 0; i < count; i++) {
             const worldX = pos.getX(i) + gridX;
             const worldZ = pos.getZ(i) + gridZ;
             const h = getWorldHeight(worldX, worldZ);
@@ -1271,9 +1273,30 @@ initMapUI();
             colors.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
         }
         
-        terrainGeo.computeVertexNormals(); 
+        // Fast buffer-based analytical normal computation (zero extra noise evaluations, eliminates slow computeVertexNormals)
+        const seg = terrainRes;
+        const Nx = seg + 1;
+        const spacing2 = (4000.0 / seg) * 2.0;
+        for (let row = 0; row < Nx; row++) {
+            const rowOffset = row * Nx;
+            const prevRowOffset = (row > 0 ? row - 1 : row) * Nx;
+            const nextRowOffset = (row < seg ? row + 1 : row) * Nx;
+
+            for (let col = 0; col < Nx; col++) {
+                const i = rowOffset + col;
+                const hL = pos.getY(rowOffset + (col > 0 ? col - 1 : col));
+                const hR = pos.getY(rowOffset + (col < seg ? col + 1 : col));
+                const hD = pos.getY(prevRowOffset + col);
+                const hU = pos.getY(nextRowOffset + col);
+
+                tempVec1.set(hL - hR, spacing2, hD - hU).normalize();
+                norm.setXYZ(i, tempVec1.x, tempVec1.y, tempVec1.z);
+            }
+        }
+
         pos.needsUpdate = true;
         colors.needsUpdate = true;
+        norm.needsUpdate = true;
         
         lastTerrainGridX = gridX;
         lastTerrainGridZ = gridZ;
