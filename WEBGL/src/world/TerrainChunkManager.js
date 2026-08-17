@@ -48,11 +48,12 @@ export class TerrainChunkManager {
             const h = getWorldHeight(worldX, worldZ);
             pos.setY(i, h);
 
-            const hL = getWorldHeight(worldX - 12, worldZ);
-            const hR = getWorldHeight(worldX + 12, worldZ);
-            const hD = getWorldHeight(worldX, worldZ - 12);
-            const hU = getWorldHeight(worldX, worldZ + 12);
-            this.tempVec.set(hL - hR, 24.0, hD - hU).normalize();
+            const normDelta = 25.0;
+            const hL = getWorldHeight(worldX - normDelta, worldZ);
+            const hR = getWorldHeight(worldX + normDelta, worldZ);
+            const hD = getWorldHeight(worldX, worldZ - normDelta);
+            const hU = getWorldHeight(worldX, worldZ + normDelta);
+            this.tempVec.set(hL - hR, normDelta * 2.0, hD - hU).normalize();
             norm.setXYZ(i, this.tempVec.x, this.tempVec.y, this.tempVec.z);
 
             getWorldColor(h, worldX, worldZ, this.tempColor);

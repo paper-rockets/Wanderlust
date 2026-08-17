@@ -585,7 +585,7 @@ initMapUI();
 
     const envFolder = gui.addFolder('Environment');
     envFolder.add(params, 'wind').name('Wind').onChange(v => { if(isWindOn !== v) document.getElementById('wind-toggle').click(); });
-    envFolder.add(params, 'rain').name('Rain').onChange(v => { isRainOn = v; if(typeof rainSystem !== 'undefined') rainSystem.visible = v; });
+    envFolder.add(params, 'rain').name('Rain').onChange(v => { isRainOn = v; if(typeof rainSystem !== 'undefined') rainSystem.mesh.visible = v; });
     envFolder.add(params, 'fogPlane').name('Ground Fog').onChange(v => { if(typeof window.fogGroup !== 'undefined') window.fogGroup.visible = v; });
     envFolder.add(params, 'godRays').name('God Rays').onChange(v => { godRaysPass.enabled = v; });
     envFolder.add(params, 'godRayIntensity', 0, 2, 0.05).name('Ray Intensity').onChange(v => { godRaysPass.uniforms.uIntensity.value = v; });
@@ -1602,9 +1602,134 @@ initMapUI();
         const instClouds = new THREE.InstancedMesh(geoCloud, matCloud, CLOUD_COUNT);
     const instFlowers = new THREE.InstancedMesh(geoFlower, matFlower, FLOWER_COUNT);
 
+    // Rain System
+    class RainSystem {
+        constructor(scene) {
+            this.scene = scene;
+            this.count = LOW_GFX ? 0 : 25000;
+            if (this.count === 0) return;
+            
+            const hw = 0.08;
+            const hh = 1.6;
+            const positions = new Float32Array([
+                -hw, -hh, 0,    hw, -hh, 0,    hw,  hh, 0,
+                -hw, -hh, 0,    hw,  hh, 0,   -hw,  hh, 0,
+                0, -hh, -hw,    0, -hh,  hw,   0,   hh,  hw,
+                0, -hh, -hw,    0,   hh,  hw,   0,   hh, -hw
+            ]);
+            const uvs = new Float32Array([
+                0, 0,   1, 0,   1, 1,
+                0, 0,   1, 1,   0, 1,
+                0, 0,   1, 0,   1, 1,
+                0, 0,   1, 1,   0, 1
+            ]);
+            const geometry = new THREE.InstancedBufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
 
+            const instPos = new Float32Array(this.count * 3);
+            const instSpeed = new Float32Array(this.count);
+            const instRand = new Float32Array(this.count);
+            for (let i = 0; i < this.count; i++) {
+                instPos[i * 3 + 0] = (Math.random() - 0.5) * 500;
+                instPos[i * 3 + 1] = Math.random() * 250 - 50;
+                instPos[i * 3 + 2] = (Math.random() - 0.5) * 500;
+                instSpeed[i] = 110.0 + Math.random() * 60.0;
+                instRand[i] = Math.random();
+            }
+            geometry.setAttribute('aInstPos', new THREE.InstancedBufferAttribute(instPos, 3));
+            geometry.setAttribute('aInstSpeed', new THREE.InstancedBufferAttribute(instSpeed, 1));
+            geometry.setAttribute('aInstRand', new THREE.InstancedBufferAttribute(instRand, 1));
+            geometry.instanceCount = this.count;
 
+            this.uniforms = {
+                uTime: { value: 0 },
+                uCamPos: { value: new THREE.Vector3() },
+                uSize: { value: 2.0 },
+                uWind: { value: new THREE.Vector2(1.0, 0.5) },
+                uIntensity: { value: 1.0 }
+            };
 
+            const material = new THREE.ShaderMaterial({
+                uniforms: this.uniforms,
+                vertexShader: `
+                    uniform float uTime;
+                    uniform vec3 uCamPos;
+                    uniform float uSize;
+                    uniform vec2 uWind;
+
+                    attribute vec3 aInstPos;
+                    attribute float aInstSpeed;
+                    attribute float aInstRand;
+
+                    varying vec2 vUv;
+                    varying float vAlpha;
+
+                    void main() {
+                        vUv = uv;
+                        
+                        float fallOffset = -uTime * aInstSpeed;
+                        float windOffsetX = uTime * uWind.x * 25.0;
+                        float windOffsetZ = uTime * uWind.y * 25.0;
+
+                        float relX = aInstPos.x + windOffsetX - uCamPos.x;
+                        float relZ = aInstPos.z + windOffsetZ - uCamPos.z;
+                        float relY = aInstPos.y + fallOffset - uCamPos.y;
+
+                        float wrappedX = mod(relX + 250.0, 500.0) - 250.0 + uCamPos.x;
+                        float wrappedZ = mod(relZ + 250.0, 500.0) - 250.0 + uCamPos.z;
+                        float wrappedY = mod(relY + 60.0, 240.0) - 60.0 + uCamPos.y;
+
+                        vec3 scaledLocal = position * (uSize * 0.5);
+                        vec3 worldPos = vec3(wrappedX, wrappedY, wrappedZ) + scaledLocal;
+                        worldPos.x += scaledLocal.y * (uWind.x * 0.15);
+                        worldPos.z += scaledLocal.y * (uWind.y * 0.15);
+
+                        float dist = length(worldPos - uCamPos);
+                        vAlpha = clamp(1.0 - dist / 350.0, 0.0, 1.0) * smoothstep(1.5, 12.0, dist) * (aInstRand * 0.4 + 0.6);
+
+                        gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform float uIntensity;
+                    varying vec2 vUv;
+                    varying float vAlpha;
+
+                    void main() {
+                        float streak = sin(vUv.y * 3.1415926);
+                        float width = 1.0 - smoothstep(0.0, 0.5, abs(vUv.x - 0.5));
+                        float alpha = streak * width * vAlpha * uIntensity * 0.75;
+                        if (alpha < 0.01) discard;
+                        gl_FragColor = vec4(0.88, 0.94, 1.0, alpha);
+                    }
+                `,
+                transparent: true,
+                depthWrite: false,
+                side: THREE.DoubleSide,
+                blending: THREE.NormalBlending
+            });
+
+            this.mesh = new THREE.Mesh(geometry, material);
+            this.mesh.frustumCulled = false;
+            this.mesh.visible = false;
+            this.scene.add(this.mesh);
+        }
+
+        update(time, cam, params) {
+            if (!this.mesh) return;
+            this.mesh.visible = !!params.rain;
+            if (!params.rain) return;
+            this.uniforms.uTime.value = time;
+            this.uniforms.uCamPos.value.copy(cam.position);
+            this.uniforms.uSize.value = params.rainSize || 2.0;
+            this.uniforms.uIntensity.value = params.rainIntensity || 1.0;
+            const wx = params.rainWindX !== undefined ? params.rainWindX : 1.0;
+            const wy = params.rainWindY !== undefined ? params.rainWindY : 0.5;
+            this.uniforms.uWind.value.set(wx, wy);
+        }
+    }
+    const rainSystem = new RainSystem(scene);
 
     const rockColors = [0xe5d4ba, 0xcbb192, 0xd8c8b8, 0x8a7b69, 0xd2c0a3];
     const tempRockColor = new THREE.Color();
@@ -2943,6 +3068,9 @@ initMapUI();
         waterUniforms.uTime.value = time;
         if (typeof treeUniforms !== 'undefined') {
             treeUniforms.uPlayerPos.value.copy(playerGrp.position);
+        }
+        if (typeof rainSystem !== 'undefined') {
+            rainSystem.update(time, camera, params);
         }
 
         

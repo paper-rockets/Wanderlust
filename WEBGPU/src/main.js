@@ -24,7 +24,7 @@ import { setupGodMode, toggleGodMode } from './physics/GodMode.js';
 
 
 import { MeshToonNodeMaterial, MeshStandardNodeMaterial, MeshBasicNodeMaterial, PointsNodeMaterial } from 'three/webgpu';
-import { uniform, texture, Fn, positionLocal, abs, positionGeometry, sin, cos, step, positionWorld, cameraPosition, normalWorld, float, vec2, vec3, vec4, dot, fract, mix, clamp, normalize, pow, max, min, smoothstep as tslSmoothstep, attribute } from 'three/tsl';
+import { uniform, texture, Fn, positionLocal, abs, positionGeometry, sin, cos, step, positionWorld, cameraPosition, normalWorld, float, vec2, vec3, vec4, dot, fract, mix, clamp, normalize, pow, max, min, smoothstep as tslSmoothstep, attribute, uv } from 'three/tsl';
 import { scene, camera, renderer, clock } from './core/Engine.js';
 import { postProcessing as composer, initPostProcessing, bloomPass, godRaysPass, initPostProcessingUI, scenePass, uToneExposure } from './core/PostProcessing.js';
 
@@ -1715,11 +1715,12 @@ import { postProcessing as composer, initPostProcessing, bloomPass, godRaysPass,
             colors.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
 
             // Fast analytical heightmap normals (avoids expensive computeVertexNormals triangle pass)
-            const hL = getWorldHeight(worldX - 12, worldZ);
-            const hR = getWorldHeight(worldX + 12, worldZ);
-            const hD = getWorldHeight(worldX, worldZ - 12);
-            const hU = getWorldHeight(worldX, worldZ + 12);
-            tempVec1.set(hL - hR, 24.0, hD - hU).normalize();
+            const normDelta = 25.0;
+            const hL = getWorldHeight(worldX - normDelta, worldZ);
+            const hR = getWorldHeight(worldX + normDelta, worldZ);
+            const hD = getWorldHeight(worldX, worldZ - normDelta);
+            const hU = getWorldHeight(worldX, worldZ + normDelta);
+            tempVec1.set(hL - hR, normDelta * 2.0, hD - hU).normalize();
             norm.setXYZ(i, tempVec1.x, tempVec1.y, tempVec1.z);
 
             getWorldColor(h, worldX, worldZ, tempColor);
@@ -2209,56 +2210,98 @@ import { postProcessing as composer, initPostProcessing, bloomPass, godRaysPass,
         constructor(scene) {
             this.scene = scene;
             this.count = 20000;
-            const positions = new Float32Array(this.count * 3);
-            const rand = new Float32Array(this.count);
-            for (let i = 0; i < this.count; i++) {
-                positions[i * 3]     = (Math.random() - 0.5) * 400;
-                positions[i * 3 + 1] = Math.random() * 120;
-                positions[i * 3 + 2] = (Math.random() - 0.5) * 400;
-                rand[i] = Math.random();
-            }
-            const geometry = new THREE.BufferGeometry();
+            
+            const hw = 0.08;
+            const hh = 1.6;
+            // Cross-quad geometry: 2 perpendicular planes (XY and ZY) for 360-degree visibility
+            const positions = new Float32Array([
+                -hw, -hh, 0,    hw, -hh, 0,    hw,  hh, 0,
+                -hw, -hh, 0,    hw,  hh, 0,   -hw,  hh, 0,
+                0, -hh, -hw,    0, -hh,  hw,   0,   hh,  hw,
+                0, -hh, -hw,    0,   hh,  hw,   0,   hh, -hw
+            ]);
+            const uvs = new Float32Array([
+                0, 0,   1, 0,   1, 1,
+                0, 0,   1, 1,   0, 1,
+                0, 0,   1, 0,   1, 1,
+                0, 0,   1, 1,   0, 1
+            ]);
+            const geometry = new THREE.InstancedBufferGeometry();
             geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            geometry.setAttribute('aRand', new THREE.BufferAttribute(rand, 1));
+            geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+
+            const instPos = new Float32Array(this.count * 3);
+            const instSpeed = new Float32Array(this.count);
+            const instRand = new Float32Array(this.count);
+            for (let i = 0; i < this.count; i++) {
+                instPos[i * 3 + 0] = (Math.random() - 0.5) * 500;
+                instPos[i * 3 + 1] = Math.random() * 250 - 50;
+                instPos[i * 3 + 2] = (Math.random() - 0.5) * 500;
+                instSpeed[i] = 110.0 + Math.random() * 60.0;
+                instRand[i] = Math.random();
+            }
+            geometry.setAttribute('aInstPos', new THREE.InstancedBufferAttribute(instPos, 3));
+            geometry.setAttribute('aInstSpeed', new THREE.InstancedBufferAttribute(instSpeed, 1));
+            geometry.setAttribute('aInstRand', new THREE.InstancedBufferAttribute(instRand, 1));
+            geometry.instanceCount = this.count;
 
             const uTime = uniform(0.0);
             const uCamPos = uniform(new THREE.Vector3());
             const uSize = uniform(2.0);
             const uWind = uniform(new THREE.Vector2(1.0, 0.5));
             const uIntensity = uniform(1.0);
-
             this.uniforms = { uTime, uCamPos, uSize, uWind, uIntensity };
 
-            const aRand = attribute('aRand', 'float');
+            const aInstPos = attribute('aInstPos', 'vec3');
+            const aInstSpeed = attribute('aInstSpeed', 'float');
+            const aInstRand = attribute('aInstRand', 'float');
 
             const posNode = Fn(() => {
-                const pos = positionLocal.toVar();
-                const speed = float(70.0).add(aRand.mul(40.0));
-                const fallY = fract(pos.y.sub(uTime.mul(speed)).div(120.0).add(aRand)).mul(120.0);
-                const windDriftX = uTime.mul(uWind.x).mul(aRand.mul(0.5).add(0.75));
-                const windDriftZ = uTime.mul(uWind.y).mul(aRand.mul(0.3).add(0.85));
-                const wx = fract(pos.x.add(windDriftX).add(uCamPos.x).div(400.0).add(0.5)).mul(400.0).sub(200.0).add(uCamPos.x);
-                const wz = fract(pos.z.add(windDriftZ).add(uCamPos.z).div(400.0).add(0.5)).mul(400.0).sub(200.0).add(uCamPos.z);
-                const wy = fallY.add(uCamPos.y).sub(60.0);
-                return vec4(wx, wy, wz, 1.0);
+                const localPos = positionGeometry.toVar();
+                const fallOffset = uTime.mul(aInstSpeed).negate();
+                const windOffsetX = uTime.mul(uWind.x).mul(25.0);
+                const windOffsetZ = uTime.mul(uWind.y).mul(25.0);
+
+                const relX = aInstPos.x.add(windOffsetX).sub(uCamPos.x);
+                const relZ = aInstPos.z.add(windOffsetZ).sub(uCamPos.z);
+                const relY = aInstPos.y.add(fallOffset).sub(uCamPos.y);
+
+                const wrappedX = fract(relX.add(250.0).div(500.0)).mul(500.0).sub(250.0).add(uCamPos.x);
+                const wrappedZ = fract(relZ.add(250.0).div(500.0)).mul(500.0).sub(250.0).add(uCamPos.z);
+                const wrappedY = fract(relY.add(60.0).div(240.0)).mul(240.0).sub(60.0).add(uCamPos.y);
+
+                const scaledLocal = localPos.mul(uSize.mul(0.5));
+                const worldX = wrappedX.add(scaledLocal.x).add(scaledLocal.y.mul(uWind.x).mul(0.15));
+                const worldY = wrappedY.add(scaledLocal.y);
+                const worldZ = wrappedZ.add(scaledLocal.z).add(scaledLocal.y.mul(uWind.y).mul(0.15));
+
+                return vec4(worldX, worldY, worldZ, 1.0);
             })();
 
-            const material = new PointsNodeMaterial({
+            const colorNode = Fn(() => {
+                const uvNode = uv();
+                const streak = sin(uvNode.y.mul(Math.PI));
+                const width = float(1.0).sub(tslSmoothstep(0.0, 0.5, abs(uvNode.x.sub(0.5))));
+                const alpha = streak.mul(width).mul(uIntensity).mul(aInstRand.mul(0.4).add(0.6)).mul(0.75);
+                return vec4(0.88, 0.94, 1.0, alpha);
+            })();
+
+            const material = new MeshBasicNodeMaterial({
                 transparent: true,
                 depthWrite: false,
+                side: THREE.DoubleSide,
                 positionNode: posNode,
-                colorNode: vec4(0.55, 0.6, 0.75, uIntensity.mul(0.5)),
-                sizeNode: uSize.mul(aRand.mul(0.6).add(0.4))
+                colorNode: colorNode
             });
 
-            this.mesh = new THREE.Points(geometry, material);
+            this.mesh = new THREE.Mesh(geometry, material);
             this.mesh.frustumCulled = false;
             this.mesh.visible = false;
             this.scene.add(this.mesh);
         }
 
         update(time, cam, params) {
-            this.mesh.visible = params.rain;
+            this.mesh.visible = !!params.rain;
             if (!params.rain) return;
             this.uniforms.uTime.value = time;
             this.uniforms.uCamPos.value.copy(cam.position);

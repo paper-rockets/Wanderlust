@@ -2120,11 +2120,12 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             colors.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
 
             // Fast analytical heightmap normals (avoids expensive computeVertexNormals triangle pass)
-            const hL = getWorldHeight(worldX - 12, worldZ);
-            const hR = getWorldHeight(worldX + 12, worldZ);
-            const hD = getWorldHeight(worldX, worldZ - 12);
-            const hU = getWorldHeight(worldX, worldZ + 12);
-            tempVec1.set(hL - hR, 24.0, hD - hU).normalize();
+            const normDelta = 25.0;
+            const hL = getWorldHeight(worldX - normDelta, worldZ);
+            const hR = getWorldHeight(worldX + normDelta, worldZ);
+            const hD = getWorldHeight(worldX, worldZ - normDelta);
+            const hU = getWorldHeight(worldX, worldZ + normDelta);
+            tempVec1.set(hL - hR, normDelta * 2.0, hD - hU).normalize();
             norm.setXYZ(i, tempVec1.x, tempVec1.y, tempVec1.z);
 
             getWorldColor(h, worldX, worldZ, tempColor);
@@ -2854,28 +2855,50 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     class RainSystem {
         constructor(scene) {
             this.scene = scene;
-            this.count = 30000;
-            const positions = new Float32Array(this.count * 3);
-            const rand = new Float32Array(this.count);
-            for(let i=0; i<this.count; i++) {
-                positions[i*3] = (Math.random() - 0.5) * 300;
-                positions[i*3+1] = Math.random() * 100;
-                positions[i*3+2] = (Math.random() - 0.5) * 300;
-                rand[i] = Math.random();
-            }
-            const geometry = new THREE.BufferGeometry();
-            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            geometry.setAttribute('aRand', new THREE.BufferAttribute(rand, 1));
+            this.count = 25000;
             
+            const hw = 0.08;
+            const hh = 1.6;
+            // Cross-quad geometry: 2 perpendicular planes (XY and ZY) for 360-degree visibility
+            const positions = new Float32Array([
+                -hw, -hh, 0,    hw, -hh, 0,    hw,  hh, 0,
+                -hw, -hh, 0,    hw,  hh, 0,   -hw,  hh, 0,
+                0, -hh, -hw,    0, -hh,  hw,   0,   hh,  hw,
+                0, -hh, -hw,    0,   hh,  hw,   0,   hh, -hw
+            ]);
+            const uvs = new Float32Array([
+                0, 0,   1, 0,   1, 1,
+                0, 0,   1, 1,   0, 1,
+                0, 0,   1, 0,   1, 1,
+                0, 0,   1, 1,   0, 1
+            ]);
+            const geometry = new THREE.InstancedBufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+
+            const instPos = new Float32Array(this.count * 3);
+            const instSpeed = new Float32Array(this.count);
+            const instRand = new Float32Array(this.count);
+            for (let i = 0; i < this.count; i++) {
+                instPos[i * 3 + 0] = (Math.random() - 0.5) * 500;
+                instPos[i * 3 + 1] = Math.random() * 250 - 50;
+                instPos[i * 3 + 2] = (Math.random() - 0.5) * 500;
+                instSpeed[i] = 110.0 + Math.random() * 60.0;
+                instRand[i] = Math.random();
+            }
+            geometry.setAttribute('aInstPos', new THREE.InstancedBufferAttribute(instPos, 3));
+            geometry.setAttribute('aInstSpeed', new THREE.InstancedBufferAttribute(instSpeed, 1));
+            geometry.setAttribute('aInstRand', new THREE.InstancedBufferAttribute(instRand, 1));
+            geometry.instanceCount = this.count;
+
             this.uniforms = {
                 uTime: { value: 0 },
                 uCamPos: { value: new THREE.Vector3() },
                 uSize: { value: 2.0 },
-                uWind: { value: new THREE.Vector2(0, 0) },
-                uIntensity: { value: 1.0 },
-                uAngle: { value: 0.0 }
+                uWind: { value: new THREE.Vector2(1.0, 0.5) },
+                uIntensity: { value: 1.0 }
             };
-            
+
             const material = new THREE.ShaderMaterial({
                 uniforms: this.uniforms,
                 vertexShader: `
@@ -2883,72 +2906,78 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
                     uniform vec3 uCamPos;
                     uniform float uSize;
                     uniform vec2 uWind;
-                    
-                    attribute float aRand;
-                    varying float vRand;
-                    
+
+                    attribute vec3 aInstPos;
+                    attribute float aInstSpeed;
+                    attribute float aInstRand;
+
+                    varying vec2 vUv;
+                    varying float vAlpha;
+
                     void main() {
-                        vRand = aRand;
-                        vec3 pos = position;
+                        vUv = uv;
                         
-                        float fallSpeed = 60.0 + aRand * 20.0;
-                        pos.y -= uTime * fallSpeed;
-                        pos.x += uTime * uWind.x * 20.0;
-                        pos.z += uTime * uWind.y * 20.0;
-                        
-                        pos.x = mod(pos.x - uCamPos.x + 150.0, 300.0) - 150.0 + uCamPos.x;
-                        pos.z = mod(pos.z - uCamPos.z + 150.0, 300.0) - 150.0 + uCamPos.z;
-                        pos.y = mod(pos.y - uCamPos.y + 20.0, 100.0) - 20.0 + uCamPos.y;
-                        
-                        vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-                        gl_Position = projectionMatrix * mvPosition;
-                        gl_PointSize = uSize * (300.0 / -mvPosition.z) * (aRand * 0.5 + 0.5);
+                        float fallOffset = -uTime * aInstSpeed;
+                        float windOffsetX = uTime * uWind.x * 25.0;
+                        float windOffsetZ = uTime * uWind.y * 25.0;
+
+                        float relX = aInstPos.x + windOffsetX - uCamPos.x;
+                        float relZ = aInstPos.z + windOffsetZ - uCamPos.z;
+                        float relY = aInstPos.y + fallOffset - uCamPos.y;
+
+                        float wrappedX = mod(relX + 250.0, 500.0) - 250.0 + uCamPos.x;
+                        float wrappedZ = mod(relZ + 250.0, 500.0) - 250.0 + uCamPos.z;
+                        float wrappedY = mod(relY + 60.0, 240.0) - 60.0 + uCamPos.y;
+
+                        vec3 scaledLocal = position * (uSize * 0.5);
+                        vec3 worldPos = vec3(wrappedX, wrappedY, wrappedZ) + scaledLocal;
+                        worldPos.x += scaledLocal.y * (uWind.x * 0.15);
+                        worldPos.z += scaledLocal.y * (uWind.y * 0.15);
+
+                        float dist = length(worldPos - uCamPos);
+                        vAlpha = clamp(1.0 - dist / 350.0, 0.0, 1.0) * smoothstep(1.5, 12.0, dist) * (aInstRand * 0.4 + 0.6);
+
+                        gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
                     }
                 `,
                 fragmentShader: `
                     uniform float uIntensity;
-                    uniform float uAngle;
-                    varying float vRand;
-                    
+                    varying vec2 vUv;
+                    varying float vAlpha;
+
                     void main() {
-                        vec2 coord = gl_PointCoord - vec2(0.5);
-                        float s = sin(uAngle);
-                        float c = cos(uAngle);
-                        vec2 rotCoord = vec2(coord.x * c - coord.y * s, coord.x * s + coord.y * c);
-                        if (length(vec2(rotCoord.x * 6.0, rotCoord.y)) > 0.5) discard;
-                        // Darker, semi-transparent blueish rain drop
-                        gl_FragColor = vec4(0.4, 0.5, 0.7, 0.6 * uIntensity);
+                        float streak = sin(vUv.y * 3.1415926);
+                        float width = 1.0 - smoothstep(0.0, 0.5, abs(vUv.x - 0.5));
+                        float alpha = streak * width * vAlpha * uIntensity * 0.75;
+                        if (alpha < 0.01) discard;
+                        gl_FragColor = vec4(0.88, 0.94, 1.0, alpha);
                     }
                 `,
                 transparent: true,
                 depthWrite: false,
+                side: THREE.DoubleSide,
                 blending: THREE.NormalBlending
             });
-            
-            this.mesh = new THREE.Points(geometry, material);
+
+            this.mesh = new THREE.Mesh(geometry, material);
             this.mesh.frustumCulled = false;
             this.mesh.visible = false;
             this.scene.add(this.mesh);
         }
-        
+
         update(time, cam, params) {
-            this.mesh.visible = params.rain;
+            this.mesh.visible = !!params.rain;
             if (!params.rain) return;
             this.uniforms.uTime.value = time;
             this.uniforms.uCamPos.value.copy(cam.position);
             this.uniforms.uSize.value = params.rainSize || 2.0;
             this.uniforms.uIntensity.value = params.rainIntensity || 1.0;
-            
-            let wx = 1.0; let wy = 0.5;
-            if (params.rainWindX !== undefined) {
-                wx = params.rainWindX;
-                wy = params.rainWindY;
-            }
+            const wx = params.rainWindX !== undefined ? params.rainWindX : 1.0;
+            const wy = params.rainWindY !== undefined ? params.rainWindY : 0.5;
             this.uniforms.uWind.value.set(wx, wy);
-            this.uniforms.uAngle.value = Math.atan2(wx * 20.0, -70.0);
         }
     }
-    
+
     window.rainSystem = new RainSystem(scene);
 
     // ==========================================
