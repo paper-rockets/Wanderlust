@@ -3621,7 +3621,8 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
 
                         if (valid) {
                             dummy.position.set(nx, h, nz);
-                            dummy.rotation.set(0, 0, 0);
+                            const angToCam = Math.atan2(focusX - nx, focusZ - nz);
+                            dummy.rotation.set(0, angToCam, 0);
                             
                             // Dynamic scale & aspect ratio variation for natural forest canopy height
                             let s = (bbIdx === 1) ? (1.5 + Math.random() * 1.5) : (0.88 + Math.random() * 0.65);
