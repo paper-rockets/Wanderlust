@@ -5,6 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: '/Wanderlust/legacy/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

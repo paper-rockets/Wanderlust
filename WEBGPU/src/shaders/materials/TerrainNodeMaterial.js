@@ -32,23 +32,20 @@ export const createTerrainMaterial = (uTime, uSunDir, uSandNoiseMap, uShimmerMul
         // 1. Sand Shimmer & Sparkling Diamond Glitter (aBiomeType == 1.0)
         const isSand = step(0.9, aBiomeType).mul(step(aBiomeType, 1.1));
         const rim = float(1.0).sub(clamp(dot(norm, viewDir), 0.0, 1.0));
-        const rimStrength = pow(rim, float(4.0)).mul(lightFacing.mul(0.7).add(0.3)).mul(0.40);
-        const rimGlow = vec3(1.0, 0.75, 0.42).mul(rimStrength);
+        const rimGlowStrength = pow(rim, float(3.0)).mul(lightFacing.mul(0.75).add(0.25)).mul(0.65);
+        const rimGlow = vec3(1.0, 0.82, 0.48).mul(rimGlowStrength);
 
-        const mainSpec = pow(nDotH, float(24.0)).mul(lightFacing).mul(0.85).toVar();
-
-        const sandUV1 = positionWorld.xz.mul(0.08).add(vec2(uTime.mul(0.003), uTime.mul(0.002)));
-        const sandUV2 = positionWorld.xz.mul(0.22).sub(vec2(uTime.mul(0.005), uTime.mul(0.004)));
+        const sandUV1 = positionWorld.xz.mul(0.15).add(vec2(uTime.mul(0.003), uTime.mul(0.002)));
+        const sandUV2 = positionWorld.xz.mul(0.35).sub(vec2(uTime.mul(0.005), uTime.mul(0.004)));
         
-        let textureGlitter = texture(uSandNoiseMap, sandUV1).r.mul(0.65).add(texture(uSandNoiseMap, sandUV2).g.mul(0.55));
-        textureGlitter = pow(clamp(textureGlitter, 0.0, 1.0), 3.0);
-        mainSpec.mulAssign(textureGlitter);
+        let textureGlitter = texture(uSandNoiseMap, sandUV1).r.mul(0.6).add(texture(uSandNoiseMap, sandUV2).g.mul(0.4));
+        textureGlitter = pow(clamp(textureGlitter, 0.0, 1.0), 2.2).mul(2.5);
 
-        const rimSpec = pow(rim, 3.0).mul(textureGlitter).mul(lightFacing).mul(0.45);
-        const specColor = mainSpec.add(rimSpec).mul(vec3(1.0, 0.85, 0.58)).mul(uShimmerMult);
+        const specSheen = pow(nDotH, float(16.0)).mul(lightFacing).mul(1.2);
+        const specColor = specSheen.add(textureGlitter.mul(0.5)).mul(vec3(1.0, 0.88, 0.62)).mul(uShimmerMult);
         
         // Warm ambient terracotta backscatter in dune shadows
-        const warmBackscatter = vec3(0.08, 0.03, 0.01).mul(float(1.0).sub(lightFacing));
+        const warmBackscatter = vec3(0.06, 0.02, 0.008).mul(float(1.0).sub(lightFacing));
         
         const finalSandGlow = rimGlow.add(specColor).add(warmBackscatter).mul(isSand);
 

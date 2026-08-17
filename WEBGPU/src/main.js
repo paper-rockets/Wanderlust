@@ -320,6 +320,9 @@ import { postProcessing as composer, initPostProcessing, bloomPass, godRaysPass,
     ];
     let currentSunY = 1500;
     let currentMoonY = -1500;
+    let currentFps = 60;
+    let framesThisSecond = 0;
+    let lastFpsTime = performance.now();
     let timePhase = parseInt(localStorage.getItem('wl_timePhase')) || 0; // 0: Day, 1: Dusk, 2: Deep Twilight
     let pastelColors = [0xffd1dc, 0xd1ffd1, 0xd1e8ff, 0xfffdd1, 0xe8d1ff];
     let treeGreenVariations = [0x52c439, 0x38b000, 0x2d8028, 0x76e054, 0x6e4a32];
@@ -4470,8 +4473,6 @@ import { postProcessing as composer, initPostProcessing, bloomPass, godRaysPass,
     const quatIdentity = new THREE.Quaternion();
     // Environment & Frame timing variables (already declared above)
 
-    let lastFpsTime = performance.now();
-    let framesThisSecond = 0;
     let lastAnimTime = performance.now();
     let smoothedDt = 0.0166;
 

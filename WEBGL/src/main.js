@@ -1948,33 +1948,34 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             float isSand = step(0.9, vBiomeType) * step(vBiomeType, 1.1);
             
             if (isSand > 0.1) {
-                // Procedural micro sand ripples aligned perpendicular to wind (cos=0.796, sin=0.605)
-                vec2 duneUV = vec2(vWorldPos.x * 0.796 + vWorldPos.z * 0.605, -vWorldPos.x * 0.605 + vWorldPos.z * 0.796);
-                float rippleWarp = sin(duneUV.y * 0.08) * 1.5;
-                float ripplePattern = sin(duneUV.x * 0.45 + rippleWarp);
-                float rippleRaking = clamp(ripplePattern * 0.10 * (1.2 - lightFacing * 0.8), -0.08, 0.08);
-                gl_FragColor.rgb *= (1.0 + rippleRaking);
-
-                // Dune Rim Lighting (Fresnel glow along grazing angles and dune ridges)
+                // 1. Broad Radiant Fresnel Edge Glow (Sunlit dune crest rim lighting)
                 float rim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
-                float rimStrength = pow(rim, 4.0) * (lightFacing * 0.7 + 0.3) * 0.40;
-                vec3 rimGlow = vec3(1.0, 0.75, 0.42) * rimStrength;
-                
-                // Journey Sand Specular Glitter (Sparkling diamond grains)
-                float mainSpec = pow(nDotH, 24.0) * lightFacing * 0.85;
+                float rimGlowStrength = pow(rim, 3.0) * (lightFacing * 0.75 + 0.25) * 0.65;
+                vec3 rimGlow = vec3(1.0, 0.82, 0.48) * rimGlowStrength;
 
-                vec2 sandUV1 = vWorldPos.xz * 0.08 + uTime * 0.003;
-                vec2 sandUV2 = vWorldPos.xz * 0.22 - uTime * 0.005;
-                float textureGlitter = texture2D(uSandNoiseMap, sandUV1).r * 0.65 + texture2D(uSandNoiseMap, sandUV2).g * 0.55;
-                textureGlitter = pow(clamp(textureGlitter, 0.0, 1.0), 3.0);
-                mainSpec *= textureGlitter;
+                // 2. High-Frequency Sparkling Diamond Sand Grains (Multi-scale Glitter)
+                vec2 gridUV1 = floor(vWorldPos.xz * 2.2 + viewDir.xz * 6.0);
+                vec2 gridUV2 = floor(vWorldPos.xz * 5.5 - viewDir.xz * 10.0);
+                float sparkle1 = hash(gridUV1);
+                float sparkle2 = hash(gridUV2 + vec2(7.13, 3.71));
+                float sparkle = pow(sparkle1 * sparkle2, 5.0) * 16.0;
 
-                float rimSpec = pow(rim, 3.0) * textureGlitter * lightFacing * 0.45;
-                vec3 specColor = (mainSpec + rimSpec) * vec3(1.0, 0.85, 0.58) * uShimmerMult;
+                // Texture-assisted micro glints
+                vec2 sandUV1 = vWorldPos.xz * 0.15;
+                vec2 sandUV2 = vWorldPos.xz * 0.35;
+                float texNoise = texture2D(uSandNoiseMap, sandUV1).r * 0.6 + texture2D(uSandNoiseMap, sandUV2).g * 0.4;
+                float texSparkle = pow(texNoise, 2.2) * 2.5;
+
+                // 3. Blinn-Phong Specular Sheen
+                float specSheen = pow(nDotH, 16.0) * lightFacing * 1.2;
                 
+                // Combine glittering sparkle with specular sheen & grazing rim sparkle
+                float totalGlitter = (specSheen * (sparkle + 0.4) + sparkle * 0.5 + texSparkle * 0.3) * lightFacing;
+                vec3 specColor = totalGlitter * vec3(1.0, 0.88, 0.62) * uShimmerMult;
+
                 // Warm ambient terracotta backscatter in dune shadows
-                vec3 warmBackscatter = vec3(0.08, 0.03, 0.01) * (1.0 - lightFacing);
-                
+                vec3 warmBackscatter = vec3(0.06, 0.02, 0.008) * (1.0 - lightFacing);
+
                 gl_FragColor.rgb += (rimGlow + specColor + warmBackscatter) * isSand;
             }
 
