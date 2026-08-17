@@ -1,16 +1,25 @@
 import * as THREE from 'three';
 import { PostProcessing } from 'three/webgpu';
 import { pass, vec2, vec3, vec4, mix, smoothstep, max, clamp, dot, float, uv, uniform, Loop, length, Fn, screenCoordinate, fract, sin, toneMapping } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { LOW_GFX } from '../config/constants.js';
 import { renderer, scene, camera } from './Engine.js';
 import { buildPortalWarpNode, uWarpIntensity } from '../vfx/PortalWarpPass.js';
 
 export let postProcessing;
 export let scenePass;
+let bloomNode = null;
+
+export const uBloomStrength = uniform(0.35);
+export const uBloomRadius = uniform(0.4);
+export const uBloomThreshold = uniform(0.85);
+export let isBloomOn = !LOW_GFX;
 
 export function initPostProcessing() {
     postProcessing = new PostProcessing(renderer);
     scenePass = pass(scene, camera);
+    const sceneColor = scenePass.getTextureNode('output');
+    bloomNode = bloom(sceneColor, uBloomStrength, uBloomRadius, uBloomThreshold);
     updatePostProcessingPipeline();
 }
 
@@ -24,7 +33,7 @@ export const uSunVisible = uniform(1.0);
 export const uRayColor = uniform(new THREE.Color(0xffd580));
 export let isGodRaysEnabled = !LOW_GFX;
 
-// Interleaved Gradient Noise (IGN) — clean low-discrepancy sampling, zero noise dust
+// Interleaved Gradient Noise (IGN) - clean low-discrepancy sampling, zero noise dust
 const ignDither = (p) => {
     const magic = vec3(0.06711056, 0.00583715, 52.9829189);
     return fract(magic.z.mul(fract(dot(p, magic.xy))));
@@ -92,7 +101,15 @@ export const uToneExposure = uniform(1.2);
 // Main post processing graph setup
 export function updatePostProcessingPipeline() {
     if (!postProcessing || !scenePass) return;
-    let outputNode = scenePass;
+    const sceneColor = scenePass.getTextureNode('output');
+    let outputNode = sceneColor;
+
+    if (isBloomOn) {
+        if (!bloomNode) {
+            bloomNode = bloom(sceneColor, uBloomStrength, uBloomRadius, uBloomThreshold);
+        }
+        outputNode = outputNode.add(bloomNode);
+    }
 
     if (isGodRaysEnabled) {
         outputNode = buildGodRaysNode(outputNode);
@@ -110,7 +127,36 @@ export function updatePostProcessingPipeline() {
     postProcessing.needsUpdate = true;
 }
 
-export const bloomPass = { enabled: !LOW_GFX };
+export const bloomPass = {
+    get enabled() {
+        return isBloomOn;
+    },
+    set enabled(v) {
+        if (isBloomOn !== v) {
+            isBloomOn = v;
+            updatePostProcessingPipeline();
+        }
+    },
+    get strength() {
+        return uBloomStrength.value;
+    },
+    set strength(v) {
+        uBloomStrength.value = v;
+    },
+    get radius() {
+        return uBloomRadius.value;
+    },
+    set radius(v) {
+        uBloomRadius.value = v;
+    },
+    get threshold() {
+        return uBloomThreshold.value;
+    },
+    set threshold(v) {
+        uBloomThreshold.value = v;
+    }
+};
+
 export const godRaysPass = { 
     enabled: !LOW_GFX,
     uniforms: {

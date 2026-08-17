@@ -12,7 +12,7 @@ export const renderPass = new RenderPass(scene, camera);
 composer.addPass(renderPass);
 
 const _bloomRes = LOW_GFX ? new THREE.Vector2(window.innerWidth * 0.5, window.innerHeight * 0.5) : new THREE.Vector2(window.innerWidth, window.innerHeight);
-export const bloomPass = new UnrealBloomPass(_bloomRes, 0.80, 0.40, 1.5);
+export const bloomPass = new UnrealBloomPass(_bloomRes, 0.35, 0.40, 1.5);
 bloomPass.enabled = !LOW_GFX;
 composer.addPass(bloomPass);
 

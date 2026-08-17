@@ -42,9 +42,9 @@ export const BIOME_SKY_CONFIGS = {
         turbulence: 0.0, stormDarken: 0.0
     },
     'Desert Dunes': {
-        coverage: 0.08, edge: 0.12, speed: 0.008,
-        skyZenith: 0xb89048, skyHorizon: 0xe8c890,
-        cloudCol: 0xf8e0b0, cloudShadow: 0xa88860,
+        coverage: 0.04, edge: 0.14, speed: 0.005,
+        skyZenith: 0x2472b5, skyHorizon: 0xf5caa0,
+        cloudCol: 0xfffae8, cloudShadow: 0x8a7082,
         turbulence: 0.0, stormDarken: 0.0
     },
     'Badlands Canyon': {

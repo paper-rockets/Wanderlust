@@ -307,6 +307,15 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         }
     }
 
+    let envConfigs = [
+        {bg: 0x8cbce6, fog: 0x8cbce6, amb: 0xdcf2ff, dir: 0xfffaeb, ambI: 0.9, dirI: 2.5, starOp: 0, sunY: 2500, moonY: -1500, glintCol: 0xfff0d0, cloudCol: 0xfffaec}, // Day (high sun)
+        {bg: 0xff5a18, fog: 0xd45012, amb: 0xff8833, dir: 0xff6600, ambI: 1.2, dirI: 3.5, starOp: 0, sunY: 1200, moonY: 200, glintCol: 0xff7a00, cloudCol: 0xff9040}, // Dusk / Golden Hour (warm horizon sunset)
+        {bg: 0x162d5a, fog: 0x224888, amb: 0x7788bb, dir: 0xffbb55, ambI: 1.5, dirI: 3.5, starOp: 1.0, sunY: -8000, moonY: 2200, glintCol: 0xffaa44, cloudCol: 0x2e4a80}, // Twilight / Night (Moon high)
+    ];
+    let currentSunY = 1500;
+    let currentMoonY = -1500;
+    let timePhase = parseInt(localStorage.getItem('wl_timePhase')) || 0; // 0: Day, 1: Dusk, 2: Deep Twilight
+
     const gui = new GUI();
     const params = {
         worldMode: 'Islands',
@@ -337,12 +346,17 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         waterFadeStart: 2000,
         waterFadeEnd: 20000,
         waterFadeDarken: 0.6,
+        sunAltitude: 2500,
+        sunAzimuth: 0,
+        sunDistance: 20000,
+        sunScale: 1.0,
         trails: isWindTrailsOn, lockSunToPlayer: true,
         shadows: isShadowsOn,
         treeShadows: isTreeShadowsOn,
         pineTreeSet: 'Set 1',
         shadowDist: shadowDistMode,
         bloom: isBloomOn,
+        bloomStrength: 0.35,
         terrainRes: String(terrainRes),
         renderHD: isHD,
         treeColor0: '#ffffff',
@@ -496,6 +510,9 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         isBloomOn = v;
         bloomPass.enabled = isBloomOn;
     });
+    perfFolder.add(params, 'bloomStrength', 0.05, 1.5, 0.05).name('Bloom Intensity').onChange(v => {
+        bloomPass.strength = v;
+    });
     perfFolder.add(params, 'godRays').name('God Rays').onChange(v => { godRaysPass.enabled = v; });
     perfFolder.add(params, 'godRayIntensity', 0, 6, 0.05).name('Ray Intensity').onChange(v => { godRaysPass.uniforms.uIntensity.value = v; });
 
@@ -522,52 +539,462 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         navFolder.add(navParams, zn.name).name(`${zn.name}`);
     });
 
-    // Add Presets folder
-    const presetFolder = gui.addFolder('🌟 Environment Presets');
-    presetFolder.add({ clearDesertDay: () => {
-        // Teleport to Sand Dunes
-        teleportToBiome('Desert Dunes');
-        
-        // No fog at all
-        params.fogPlane = false;
-        if (typeof window.fogGroup !== 'undefined') window.fogGroup.visible = false;
-        
-        // Clear blue sky (day)
-        params.timeOfDay = 'day';
-        
-        // Very little cloud
-        if (typeof cloudParams !== 'undefined') {
-            cloudParams.density = 0.1;
-            
-            // Turn off volumetric raymarched sky clouds for clear sky
-            params.showVolumetricClouds = false;
-            if (typeof toonCloudMat !== 'undefined' && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) {
-                toonCloudMat.uniforms.uEnableClouds.value = 0.0;
+    // ==========================================
+    // ENVIRONMENT FOLDER
+    // ==========================================
+    const envFolder = gui.addFolder('Environment');
+    envFolder.add(params, 'sceneFog').name('Global Fog').onChange(v => {
+        if (!v && typeof scene !== 'undefined' && scene.fog) {
+            scene.fog.near = 100000;
+            scene.fog.far = 200000;
+        }
+    });
+    envFolder.add(params, 'fogIntensity', 0.1, 5.0, 0.1).name('Fog Intensity');
+    envFolder.add(params, 'wind').name('Wind').onChange(v => { if(isWindOn !== v) document.getElementById('wind-toggle').click(); });
+    
+    const rainFolder = envFolder.addFolder('Rain Settings');
+    params.rainSize = 2.0;
+    params.rainIntensity = 1.0;
+    params.rainWindX = 1.0;
+    params.rainWindY = 0.5;
+    rainFolder.add(params, 'rain').name('Enable Rain').onChange(v => { isRainOn = v; });
+    rainFolder.add(params, 'rainSize', 0.5, 10.0).name('Drop Size');
+    rainFolder.add(params, 'rainIntensity', 0.1, 5.0).name('Intensity');
+    rainFolder.add(params, 'rainWindX', -5.0, 5.0).name('Wind X');
+    rainFolder.add(params, 'rainWindY', -5.0, 5.0).name('Wind Z');
+    
+    window.biomeFogSettings = window.biomeFogSettings || {};
+    const fogFolder = envFolder.addFolder('Ground Fog');
+    fogFolder.add(params, 'fogPlane').name('Enable Fog').onChange(v => { if(typeof window.fogGroup !== 'undefined') window.fogGroup.visible = v; });
+    params.biomeFogOffset = 0;
+    const fogOffsetCtrl = fogFolder.add(params, 'biomeFogOffset', -50, 50).name('Biome Fog Offset').onChange(v => {
+        if (typeof playerGrp !== 'undefined') {
+            const bName = getBiomeAt(playerGrp.position.x, playerGrp.position.z).name;
+            window.biomeFogSettings[bName] = v;
+        }
+    });
+    setInterval(() => {
+        if (typeof playerGrp !== 'undefined' && !fogOffsetCtrl.__onChangeBlocked) {
+            const bName = getBiomeAt(playerGrp.position.x, playerGrp.position.z).name;
+            const currentOffset = window.biomeFogSettings[bName] || 0;
+            if (params.biomeFogOffset !== currentOffset) {
+                params.biomeFogOffset = currentOffset;
+                fogOffsetCtrl.__onChangeBlocked = true;
+                fogOffsetCtrl.updateDisplay();
+                fogOffsetCtrl.__onChangeBlocked = false;
             }
-            
-            // Apply density to clouds
-            if (typeof instClouds !== 'undefined') {
-                instClouds.count = Math.max(1, Math.floor(params.cloudCountRegular * cloudParams.density));
-                if (instClouds.instanceMatrix) instClouds.instanceMatrix.needsUpdate = true;
-            }
-            if (typeof instHighClouds !== 'undefined') {
-                instHighClouds.count = Math.max(1, Math.floor(params.cloudCountHigh * cloudParams.density));
-                if (instHighClouds.instanceMatrix) instHighClouds.instanceMatrix.needsUpdate = true;
-            }
-            if (typeof instWispyClouds !== 'undefined') {
-                instWispyClouds.count = Math.max(1, Math.floor(params.cloudCountWispy * cloudParams.density));
-                if (instWispyClouds.instanceMatrix) instWispyClouds.instanceMatrix.needsUpdate = true;
-            }
-            if (typeof instMegaClouds !== 'undefined') {
-                instMegaClouds.count = Math.max(1, Math.floor(params.cloudCountMega * cloudParams.density));
-                if (instMegaClouds.instanceMatrix) instMegaClouds.instanceMatrix.needsUpdate = true;
+            fogFolder.title('Ground Fog (' + bName + ')');
+        }
+    }, 500);
+
+    const kikiGlowParams = {
+        intensity: 2.5,
+        distance: 300,
+        spread: 35,
+        color: '#ffaa44'
+    };
+    const glowFolder = envFolder.addFolder('Kiki Warm Side Glow');
+    glowFolder.add(kikiGlowParams, 'intensity', 0, 8, 0.1).name('Glow Power').onChange(v => {
+        if (typeof kikiLeftLight !== 'undefined') kikiLeftLight.intensity = v;
+        if (typeof kikiRightLight !== 'undefined') kikiRightLight.intensity = v;
+    });
+    glowFolder.add(kikiGlowParams, 'distance', 50, 800, 10).name('Glow Range').onChange(v => {
+        if (typeof kikiLeftLight !== 'undefined') kikiLeftLight.distance = v;
+        if (typeof kikiRightLight !== 'undefined') kikiRightLight.distance = v;
+    });
+    glowFolder.add(kikiGlowParams, 'spread', 5, 100, 1).name('Side Spread').onChange(v => {
+        if (typeof kikiLeftLight !== 'undefined') kikiLeftLight.position.x = -v;
+        if (typeof kikiRightLight !== 'undefined') kikiRightLight.position.x = v;
+    });
+    glowFolder.addColor(kikiGlowParams, 'color').name('Glow Color').onChange(v => {
+        const col = new THREE.Color(v);
+        if (typeof kikiLeftLight !== 'undefined') kikiLeftLight.color.copy(col);
+        if (typeof kikiRightLight !== 'undefined') kikiRightLight.color.copy(col);
+    });
+
+    const treeFolder = envFolder.addFolder('Global Tree Settings');
+    treeFolder.add(params, 'treeScale', 0.5, 4.0).name('Tree Scale').onChange(v => {
+        if (typeof treeUniforms !== 'undefined' && treeUniforms.uTreeScale) treeUniforms.uTreeScale.value = v;
+    });
+
+    envFolder.add(params, 'trails').name('Wind Trails').onChange(v => isWindTrailsOn = v);
+    envFolder.add(params, 'shadeMode', ['original', 'cel', 'flat'])
+        .name('Shade Mode')
+        .onChange(v => {
+            toonShaderManager.apply(scene, v);
+            gui.controllersRecursive().forEach(c => { if (c.property === 'shadeMode') c.updateDisplay(); });
+        });
+
+    // ==========================================
+    // ATMOSPHERE FOLDER
+    // ==========================================
+    const atmoParams = {
+        skyColor: '#' + (typeof envConfigs !== 'undefined' ? envConfigs[0].bg : 0x8cbce6).toString(16).padStart(6, '0'),
+        fogColor: '#' + (typeof envConfigs !== 'undefined' ? envConfigs[0].fog : 0x8cbce6).toString(16).padStart(6, '0'),
+        ambColor: '#' + (typeof envConfigs !== 'undefined' ? envConfigs[0].amb : 0xdcf2ff).toString(16).padStart(6, '0'),
+        dirColor: '#' + (typeof envConfigs !== 'undefined' ? envConfigs[0].dir : 0xfffaeb).toString(16).padStart(6, '0'),
+        ambI: typeof envConfigs !== 'undefined' ? envConfigs[0].ambI : 0.9,
+        dirI: typeof envConfigs !== 'undefined' ? envConfigs[0].dirI : 2.5,
+        glintCol: '#' + (typeof envConfigs !== 'undefined' ? envConfigs[0].glintCol : 0xfff0d0).toString(16).padStart(6, '0'),
+        sunAltitude: typeof envConfigs !== 'undefined' ? envConfigs[0].sunY : 2500,
+        sunAzimuth: 0,
+        sunDistance: 20000,
+        sunScale: 1.0
+    };
+
+    let sunFolder = null;
+    const atmoFolder = gui.addFolder('Atmosphere');
+
+    function updateAtmoParamsFromPhase() {
+        if (typeof envConfigs === 'undefined' || typeof timePhase === 'undefined') return;
+        const cur = envConfigs[timePhase];
+        atmoParams.skyColor = '#' + cur.bg.toString(16).padStart(6, '0');
+        atmoParams.fogColor = '#' + cur.fog.toString(16).padStart(6, '0');
+        atmoParams.ambColor = '#' + cur.amb.toString(16).padStart(6, '0');
+        atmoParams.dirColor = '#' + cur.dir.toString(16).padStart(6, '0');
+        atmoParams.ambI = cur.ambI;
+        atmoParams.dirI = cur.dirI;
+        atmoParams.glintCol = '#' + cur.glintCol.toString(16).padStart(6, '0');
+        atmoParams.sunAltitude = cur.sunY;
+        if (atmoFolder) {
+            atmoFolder.controllers.forEach(c => c.updateDisplay());
+        }
+        if (sunFolder) {
+            sunFolder.controllers.forEach(c => c.updateDisplay());
+        }
+    }
+
+    const timeToggleEl = document.getElementById('time-toggle');
+    if (timeToggleEl) {
+        timeToggleEl.addEventListener('click', () => {
+            setTimeout(updateAtmoParamsFromPhase, 50);
+        });
+    }
+
+    // Dedicated Sun & Sunlight Editor
+    sunFolder = atmoFolder.addFolder('Sun & Sunlight');
+    sunFolder.add(atmoParams, 'sunAltitude', -2000, 10000, 25).name('Sun Altitude').onChange(v => {
+        if (typeof envConfigs !== 'undefined') envConfigs[timePhase].sunY = v;
+        currentSunY = v;
+        params.sunAltitude = v;
+    });
+    sunFolder.add(atmoParams, 'sunAzimuth', -180, 180, 1).name('Sun Azimuth').onChange(v => {
+        params.sunAzimuth = v;
+    });
+    sunFolder.add(atmoParams, 'sunDistance', 5000, 50000, 500).name('Sun Distance').onChange(v => {
+        params.sunDistance = v;
+    });
+    sunFolder.add(atmoParams, 'sunScale', 0.2, 5.0, 0.1).name('Sun Size').onChange(v => {
+        params.sunScale = v;
+        if (typeof sunMesh !== 'undefined') sunMesh.scale.setScalar(v);
+    });
+    sunFolder.add(params, 'lockSunToPlayer').name('Lock Sun To Player');
+    sunFolder.addColor(atmoParams, 'dirColor').name('Sun Light Color').onChange(v => {
+        if (typeof envConfigs !== 'undefined') envConfigs[timePhase].dir = parseInt(v.replace('#',''), 16);
+    });
+    sunFolder.add(atmoParams, 'dirI', 0, 8, 0.1).name('Sun Intensity').onChange(v => {
+        if (typeof envConfigs !== 'undefined') envConfigs[timePhase].dirI = v;
+        if (typeof dirLight !== 'undefined') dirLight.intensity = v;
+    });
+    sunFolder.add(params, 'godRayIntensity', 0.0, 10.0, 0.1).name('God Ray Intensity').onChange(v => {
+        if (typeof godRaysPass !== 'undefined' && godRaysPass.uniforms && godRaysPass.uniforms.uIntensity) {
+            godRaysPass.uniforms.uIntensity.value = v;
+        }
+    });
+
+    // Per-biome procedural sky editor
+    const skyEditorParams = {
+        coverage: 0.45, edge: 0.07, speed: 0.02,
+        skyZenith: '#4a90d9', skyHorizon: '#b8d4e8',
+        cloudCol: '#fff8f0', cloudShadow: '#8898a8',
+        turbulence: 0.0, stormDarken: 0.0,
+        weather: 'clear'
+    };
+    const skyFolder = atmoFolder.addFolder('Procedural Sky (Per Biome)');
+
+    function writeSkyToConfig(key, val) {
+        if (typeof playerGrp !== 'undefined') {
+            const bName = getBiomeAt(playerGrp.position.x, playerGrp.position.z).name;
+            if (BIOME_SKY_CONFIGS[bName]) BIOME_SKY_CONFIGS[bName][key] = val;
+        }
+    }
+    const skyCtrlCoverage = skyFolder.add(skyEditorParams, 'coverage', 0, 1, 0.01).name('Cloud Coverage').onChange(v => writeSkyToConfig('coverage', v));
+    const skyCtrlEdge = skyFolder.add(skyEditorParams, 'edge', 0.02, 0.25, 0.005).name('Cloud Edge').onChange(v => writeSkyToConfig('edge', v));
+    const skyCtrlSpeed = skyFolder.add(skyEditorParams, 'speed', 0, 0.2, 0.002).name('Cloud Speed').onChange(v => writeSkyToConfig('speed', v));
+    const skyCtrlZenith = skyFolder.addColor(skyEditorParams, 'skyZenith').name('Sky Zenith').onChange(v => writeSkyToConfig('skyZenith', parseInt(v.replace('#',''), 16)));
+    const skyCtrlHorizon = skyFolder.addColor(skyEditorParams, 'skyHorizon').name('Sky Horizon').onChange(v => writeSkyToConfig('skyHorizon', parseInt(v.replace('#',''), 16)));
+    const skyCtrlCloudCol = skyFolder.addColor(skyEditorParams, 'cloudCol').name('Cloud Color').onChange(v => writeSkyToConfig('cloudCol', parseInt(v.replace('#',''), 16)));
+    const skyCtrlCloudShadow = skyFolder.addColor(skyEditorParams, 'cloudShadow').name('Cloud Shadow').onChange(v => writeSkyToConfig('cloudShadow', parseInt(v.replace('#',''), 16)));
+    const skyCtrlTurb = skyFolder.add(skyEditorParams, 'turbulence', 0, 1, 0.01).name('Storm Turbulence').onChange(v => writeSkyToConfig('turbulence', v));
+    const skyCtrlDarken = skyFolder.add(skyEditorParams, 'stormDarken', 0, 1, 0.01).name('Storm Darken').onChange(v => writeSkyToConfig('stormDarken', v));
+    skyFolder.add({ opacity: 1.0 }, 'opacity', 0, 1, 0.01).name('Cloud Opacity').onChange(v => {
+        if (typeof skyUniforms !== 'undefined' && skyUniforms.uCloudOpacity) skyUniforms.uCloudOpacity.value = v;
+    });
+    skyFolder.add(skyEditorParams, 'weather', ['clear', 'storm', 'overcast']).name('Weather').onChange(v => { currentWeather = v; });
+
+    setInterval(() => {
+        if (typeof playerGrp !== 'undefined') {
+            const bName = getBiomeAt(playerGrp.position.x, playerGrp.position.z).name;
+            const cfg = BIOME_SKY_CONFIGS[bName];
+            if (cfg) {
+                skyEditorParams.coverage = cfg.coverage;
+                skyEditorParams.edge = cfg.edge;
+                skyEditorParams.speed = cfg.speed;
+                skyEditorParams.skyZenith = '#' + cfg.skyZenith.toString(16).padStart(6, '0');
+                skyEditorParams.skyHorizon = '#' + cfg.skyHorizon.toString(16).padStart(6, '0');
+                skyEditorParams.cloudCol = '#' + cfg.cloudCol.toString(16).padStart(6, '0');
+                skyEditorParams.cloudShadow = '#' + cfg.cloudShadow.toString(16).padStart(6, '0');
+                skyEditorParams.turbulence = cfg.turbulence;
+                skyEditorParams.stormDarken = cfg.stormDarken;
+                [skyCtrlCoverage, skyCtrlEdge, skyCtrlSpeed, skyCtrlZenith, skyCtrlHorizon, skyCtrlCloudCol, skyCtrlCloudShadow, skyCtrlTurb, skyCtrlDarken].forEach(c => c.updateDisplay());
+                skyFolder.title('Procedural Sky (' + bName + ')');
             }
         }
-        
-        gui.controllersRecursive().forEach(c => c.updateDisplay());
-    }}, 'clearDesertDay').name('🏜️ Clear Desert Day');
+    }, 500);
 
-    // Add Editor folder (Terrain Editor & Edit Crystals)
+    atmoFolder.addColor(atmoParams, 'skyColor').name('Sky Color').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[timePhase].bg = parseInt(v.replace('#',''), 16); });
+    atmoFolder.addColor(atmoParams, 'fogColor').name('Fog Color').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[timePhase].fog = parseInt(v.replace('#',''), 16); });
+    atmoFolder.addColor(atmoParams, 'ambColor').name('Ambient Light').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[timePhase].amb = parseInt(v.replace('#',''), 16); });
+    atmoFolder.add(atmoParams, 'ambI', 0, 3).name('Amb Intensity').onChange(v => {
+        if (typeof envConfigs !== 'undefined') envConfigs[timePhase].ambI = v;
+        if (typeof ambientLight !== 'undefined') ambientLight.intensity = v;
+    });
+    atmoFolder.addColor(atmoParams, 'glintCol').name('Water Glint').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[timePhase].glintCol = parseInt(v.replace('#',''), 16); });
+
+    // Dedicated Moonlight & Night Editor
+    const moonParams = {
+        moonlightColor: '#ffbb55',
+        moonlightIntensity: 3.5,
+        nightAmbColor: '#7788bb',
+        nightAmbIntensity: 1.5,
+        nightSkyColor: '#162d5a',
+        nightFogColor: '#224888',
+        moonAltitude: 2200
+    };
+
+    const moonFolder = atmoFolder.addFolder('Moonlight & Night');
+    moonFolder.add(params, 'exposure', 0.5, 4.0, 0.1).name('Global Brightness').onChange(v => {
+        if (typeof renderer !== 'undefined') renderer.toneMappingExposure = v;
+    });
+    moonFolder.addColor(moonParams, 'moonlightColor').name('Moonlight Color').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[2].dir = parseInt(v.replace('#',''), 16); });
+    moonFolder.add(moonParams, 'moonlightIntensity', 0, 10, 0.1).name('Moonlight Power').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[2].dirI = v; });
+    moonFolder.addColor(moonParams, 'nightAmbColor').name('Night Fill Color').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[2].amb = parseInt(v.replace('#',''), 16); });
+    moonFolder.add(moonParams, 'nightAmbIntensity', 0, 5, 0.1).name('Night Fill Power').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[2].ambI = v; });
+    moonFolder.addColor(moonParams, 'nightSkyColor').name('Night Sky Color').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[2].bg = parseInt(v.replace('#',''), 16); });
+    moonFolder.addColor(moonParams, 'nightFogColor').name('Night Fog Color').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[2].fog = parseInt(v.replace('#',''), 16); });
+    moonFolder.add(moonParams, 'moonAltitude', 200, 4000, 50).name('Moon Altitude').onChange(v => { if (typeof envConfigs !== 'undefined') envConfigs[2].moonY = v; });
+
+    // ==========================================
+    // CLOUD EDITOR FOLDER
+    // ==========================================
+    function updateCloudScale(instMesh, newMulti, oldMulti) {
+        if (typeof instMesh === 'undefined' || !instMesh) return;
+        const ratio = newMulti / oldMulti;
+        const dummy = new THREE.Object3D();
+        for (let i = 0; i < instMesh.count; i++) {
+            instMesh.getMatrixAt(i, dummy.matrix);
+            dummy.matrix.decompose(dummy.position, dummy.quaternion, dummy.scale);
+            dummy.scale.multiplyScalar(ratio);
+            dummy.updateMatrix();
+            instMesh.setMatrixAt(i, dummy.matrix);
+        }
+        instMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    const cloudParams = {
+        c0: '#ffd1dc',
+        c1: '#d1ffd1',
+        c2: '#d1e8ff',
+        c3: '#fffdd1',
+        c4: '#e8d1ff',
+        opBase: 1.0,
+        opHigh: 1.0,
+        opWispy: 1.0,
+        opMega: 1.0,
+        opHorizon: 1.0,
+        enableClouds: true,
+        density: 1.0,
+        cloudScale: 1.0
+    };
+
+    let oldCloudColors = [0xffd1dc, 0xd1ffd1, 0xd1e8ff, 0xfffdd1, 0xe8d1ff];
+    function updateCloudColorForIndex(idx, newHex) {
+        const oldHex = oldCloudColors[idx];
+        const newHexVal = parseInt(newHex.replace('#',''), 16);
+        if (oldHex === newHexVal) return;
+        if (typeof pastelColors !== 'undefined') pastelColors[idx] = newHexVal;
+        const oldColor = new THREE.Color(oldHex);
+        const newColor = new THREE.Color(newHexVal);
+        const temp = new THREE.Color();
+        
+        if (typeof instClouds !== 'undefined' && typeof instHighClouds !== 'undefined') {
+            [instClouds, instHighClouds].forEach(mesh => {
+                if (!mesh) return;
+                for (let i = 0; i < mesh.count; i++) {
+                    mesh.getColorAt(i, temp);
+                    if (Math.abs(temp.r - oldColor.r) < 0.01 && Math.abs(temp.g - oldColor.g) < 0.01 && Math.abs(temp.b - oldColor.b) < 0.01) {
+                        mesh.setColorAt(i, newColor);
+                    }
+                }
+                if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+            });
+        }
+        oldCloudColors[idx] = newHexVal;
+    }
+
+    const cloudFolder = gui.addFolder('Cloud Editor');
+    cloudFolder.add(params, 'showClouds').name('Show All Clouds').onChange(v => {
+        params.showCloudsRegular = v;
+        params.showCloudsHigh = v;
+        params.showCloudsWispy = v;
+        params.showCloudsMega = v;
+        params.showCloudsHorizon = v;
+        params.showProceduralClouds = v;
+        params.showVolumetricClouds = v;
+        if (typeof instClouds !== 'undefined') instClouds.visible = v;
+        if (typeof instHighClouds !== 'undefined') instHighClouds.visible = v;
+        if (typeof instWispyClouds !== 'undefined') instWispyClouds.visible = v;
+        if (typeof instMegaClouds !== 'undefined') instMegaClouds.visible = v;
+        if (typeof instHorizonClouds1 !== 'undefined') {
+            instHorizonClouds1.visible = v;
+            instHorizonClouds2.visible = v;
+            instHorizonClouds3.visible = v;
+        }
+        if (typeof toonCloudMat !== 'undefined' && toonCloudMat && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) {
+            toonCloudMat.uniforms.uEnableClouds.value = v ? 1.0 : 0.0;
+        }
+        if (typeof skyUniforms !== 'undefined' && skyUniforms && skyUniforms.uCloudOpacity) {
+            skyUniforms.uCloudOpacity.value = v ? 1.0 : 0.0;
+        }
+        cloudFolder.controllersRecursive().forEach(c => {
+            if (c.property && (c.property.startsWith('showClouds') || c.property === 'showVolumetricClouds' || c.property === 'showProceduralClouds')) {
+                c.updateDisplay();
+            }
+        });
+    });
+
+    const regFolder = cloudFolder.addFolder('Regular Cumulus Clouds');
+    regFolder.add(params, 'showCloudsRegular').name('Show').onChange(v => { if (typeof instClouds !== 'undefined') instClouds.visible = v; });
+    regFolder.add(params, 'cloudCountRegular', 0, 300, 1).name('Count').onChange(v => {
+        CLOUD_COUNT = v;
+        if (typeof instClouds !== 'undefined' && instClouds) {
+            instClouds.count = v;
+            if (instClouds.instanceMatrix) instClouds.instanceMatrix.needsUpdate = true;
+        }
+    });
+    let prevRegScale = params.cloudScaleRegular || 1.0;
+    regFolder.add(params, 'cloudScaleRegular', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
+        if (typeof instClouds !== 'undefined') updateCloudScale(instClouds, v, prevRegScale);
+        prevRegScale = v;
+    });
+    regFolder.add(cloudParams, 'opBase', 0, 1, 0.01).name('Opacity').onChange(v => { if (typeof matCloud !== 'undefined') matCloud.opacity = v; });
+    regFolder.close();
+
+    const highFolder = cloudFolder.addFolder('Cumulonimbus Clouds');
+    highFolder.add(params, 'showCloudsHigh').name('Show').onChange(v => { if (typeof instHighClouds !== 'undefined') instHighClouds.visible = v; });
+    highFolder.add(params, 'cloudCountHigh', 0, 100, 1).name('Count').onChange(v => {
+        HIGH_CLOUD_COUNT = v;
+        if (typeof instHighClouds !== 'undefined' && instHighClouds) {
+            instHighClouds.count = v;
+            if (instHighClouds.instanceMatrix) instHighClouds.instanceMatrix.needsUpdate = true;
+        }
+    });
+    let prevHighScale = params.cloudScaleHigh || 1.0;
+    highFolder.add(params, 'cloudScaleHigh', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
+        if (typeof instHighClouds !== 'undefined') updateCloudScale(instHighClouds, v, prevHighScale);
+        prevHighScale = v;
+    });
+    highFolder.add(cloudParams, 'opHigh', 0, 1, 0.01).name('Opacity').onChange(v => { if (typeof highCloudMat !== 'undefined') highCloudMat.opacity = v; });
+    highFolder.close();
+
+    const wispyFolder = cloudFolder.addFolder('Wispy Clouds');
+    wispyFolder.add(params, 'showCloudsWispy').name('Show').onChange(v => { if (typeof instWispyClouds !== 'undefined') instWispyClouds.visible = v; });
+    wispyFolder.add(params, 'cloudCountWispy', 0, 100, 1).name('Count').onChange(v => {
+        WISPY_CLOUD_COUNT = v;
+        if (typeof instWispyClouds !== 'undefined' && instWispyClouds) {
+            instWispyClouds.count = v;
+            if (instWispyClouds.instanceMatrix) instWispyClouds.instanceMatrix.needsUpdate = true;
+        }
+    });
+    let prevWispyScale = params.cloudScaleWispy || 1.0;
+    wispyFolder.add(params, 'cloudScaleWispy', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
+        if (typeof instWispyClouds !== 'undefined') updateCloudScale(instWispyClouds, v, prevWispyScale);
+        prevWispyScale = v;
+    });
+    wispyFolder.add(cloudParams, 'opWispy', 0, 1, 0.01).name('Opacity').onChange(v => { if (typeof matWispyCloud !== 'undefined') matWispyCloud.opacity = v; });
+    wispyFolder.close();
+
+    const megaFolder = cloudFolder.addFolder('Mega Clouds');
+    megaFolder.add(params, 'showCloudsMega').name('Show').onChange(v => { if (typeof instMegaClouds !== 'undefined') instMegaClouds.visible = v; });
+    megaFolder.add(params, 'cloudCountMega', 0, 100, 1).name('Count').onChange(v => {
+        MEGA_CLOUD_COUNT = v;
+        if (typeof instMegaClouds !== 'undefined' && instMegaClouds) {
+            instMegaClouds.count = v;
+            if (instMegaClouds.instanceMatrix) instMegaClouds.instanceMatrix.needsUpdate = true;
+        }
+    });
+    let prevMegaScale = params.cloudScaleMega || 1.0;
+    megaFolder.add(params, 'cloudScaleMega', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
+        if (typeof instMegaClouds !== 'undefined') updateCloudScale(instMegaClouds, v, prevMegaScale);
+        prevMegaScale = v;
+    });
+    megaFolder.add(cloudParams, 'opMega', 0, 1, 0.01).name('Opacity').onChange(v => { if (typeof megaCloudMat !== 'undefined') megaCloudMat.opacity = v; });
+    megaFolder.close();
+
+    const horizonFolder = cloudFolder.addFolder('Horizon Clouds');
+    horizonFolder.add(params, 'showCloudsHorizon').name('Show').onChange(v => { 
+        if (typeof instHorizonClouds1 !== 'undefined') {
+            instHorizonClouds1.visible = v;
+            instHorizonClouds2.visible = v;
+            instHorizonClouds3.visible = v;
+        }
+    });
+    horizonFolder.add(params, 'cloudCountHorizon', 0, 100, 1).name('Count').onChange(v => {
+        if (typeof instHorizonClouds1 !== 'undefined') {
+            instHorizonClouds1.count = v;
+            instHorizonClouds2.count = v;
+            instHorizonClouds3.count = v;
+            if (instHorizonClouds1.instanceMatrix) instHorizonClouds1.instanceMatrix.needsUpdate = true;
+            if (instHorizonClouds2.instanceMatrix) instHorizonClouds2.instanceMatrix.needsUpdate = true;
+            if (instHorizonClouds3.instanceMatrix) instHorizonClouds3.instanceMatrix.needsUpdate = true;
+        }
+    });
+    let prevHorizonScale = params.cloudScaleHorizon || 1.0;
+    horizonFolder.add(params, 'cloudScaleHorizon', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
+        if (typeof instHorizonClouds1 !== 'undefined') updateCloudScale(instHorizonClouds1, v, prevHorizonScale);
+        if (typeof instHorizonClouds2 !== 'undefined') updateCloudScale(instHorizonClouds2, v, prevHorizonScale);
+        if (typeof instHorizonClouds3 !== 'undefined') updateCloudScale(instHorizonClouds3, v, prevHorizonScale);
+        prevHorizonScale = v;
+    });
+    horizonFolder.close();
+
+    const procFolder = cloudFolder.addFolder('Procedural Sky Clouds');
+    procFolder.add(params, 'showProceduralClouds').name('Show').onChange(v => {
+        if (typeof skyUniforms !== 'undefined' && skyUniforms && skyUniforms.uCloudOpacity) {
+            skyUniforms.uCloudOpacity.value = v ? 1.0 : 0.0;
+        }
+    });
+    procFolder.close();
+
+    const volFolder = cloudFolder.addFolder('Volumetric Raymarched Clouds');
+    volFolder.add(params, 'showVolumetricClouds').name('Show').onChange(v => {
+        if (typeof toonCloudMat !== 'undefined' && toonCloudMat && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) {
+            toonCloudMat.uniforms.uEnableClouds.value = v ? 1.0 : 0.0;
+        }
+    });
+    volFolder.close();
+
+    const paletteFolder = cloudFolder.addFolder('Cloud Colors');
+    paletteFolder.addColor(cloudParams, 'c0').name('Color 1').onChange(v => updateCloudColorForIndex(0, v));
+    paletteFolder.addColor(cloudParams, 'c1').name('Color 2').onChange(v => updateCloudColorForIndex(1, v));
+    paletteFolder.addColor(cloudParams, 'c2').name('Color 3').onChange(v => updateCloudColorForIndex(2, v));
+    paletteFolder.addColor(cloudParams, 'c3').name('Color 4').onChange(v => updateCloudColorForIndex(3, v));
+    paletteFolder.addColor(cloudParams, 'c4').name('Color 5').onChange(v => updateCloudColorForIndex(4, v));
+    paletteFolder.close();
+
+    // ==========================================
+    // EDITOR FOLDER
+    // ==========================================
     const editorFolder = gui.addFolder('Editor');
     editorFolder.add({ openTerrainEditor: () => {
         if (window.toggleTerrainEditor) {
@@ -752,8 +1179,8 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         waterEditorFolder.controllersRecursive().forEach(c => c.updateDisplay());
     }}, 'reset').name('Reset Defaults');
 
-    // 🎨 Live Biome Terrain Color & Shimmer Editor - Moved below Water Editor
-    const colorEditorFolder = editorFolder.addFolder('🎨 Terrain Color & Shimmer');
+    // Live Biome Terrain Color & Shimmer Editor - Moved below Water Editor
+    const colorEditorFolder = editorFolder.addFolder('Terrain Color & Shimmer');
     const triggerTerrainColorUpdate = () => {
         lastTerrainGridX = -9999;
         lastTerrainGridZ = -9999;
@@ -766,27 +1193,27 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         desertShadow: '#' + desertColors.valleyShadow.getHexString(),
         shimmer: 1.0
     };
-    colorEditorFolder.addColor(colorParams, 'npSnow').name('❄️ Snow Color').onChange(hex => {
+    colorEditorFolder.addColor(colorParams, 'npSnow').name('Snow Color').onChange(hex => {
         northPoleColors.snowDune.set(hex);
         triggerTerrainColorUpdate();
     });
-    colorEditorFolder.addColor(colorParams, 'npShadow').name('❄️ Snow Shadow').onChange(hex => {
+    colorEditorFolder.addColor(colorParams, 'npShadow').name('Snow Shadow').onChange(hex => {
         northPoleColors.snowShadow.set(hex);
         triggerTerrainColorUpdate();
     });
-    colorEditorFolder.addColor(colorParams, 'npPeak').name('❄️ Peak Color').onChange(hex => {
+    colorEditorFolder.addColor(colorParams, 'npPeak').name('Peak Color').onChange(hex => {
         northPoleColors.icePeak.set(hex);
         triggerTerrainColorUpdate();
     });
-    colorEditorFolder.addColor(colorParams, 'desertSlope').name('🏜️ Sand Color').onChange(hex => {
+    colorEditorFolder.addColor(colorParams, 'desertSlope').name('Sand Color').onChange(hex => {
         desertColors.duneSlope.set(hex);
         triggerTerrainColorUpdate();
     });
-    colorEditorFolder.addColor(colorParams, 'desertShadow').name('🏜️ Sand Shadow').onChange(hex => {
+    colorEditorFolder.addColor(colorParams, 'desertShadow').name('Sand Shadow').onChange(hex => {
         desertColors.valleyShadow.set(hex);
         triggerTerrainColorUpdate();
     });
-    colorEditorFolder.add(colorParams, 'shimmer', 0, 3, 0.1).name('✨ Shimmer Sparkle').onChange(val => {
+    colorEditorFolder.add(colorParams, 'shimmer', 0, 3, 0.1).name('Shimmer Sparkle').onChange(val => {
         terrainUniforms.uShimmerMult.value = val;
     });
 
@@ -799,60 +1226,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     gameFolder.add(params, 'modelVisible').name('Model Visible').onChange(v => { document.getElementById('invis-toggle').click(); });
     // Fullscreen removed from Game folder - now on the top bar!
 
-    const envFolder = gui.addFolder('Environment');
-    envFolder.add(params, 'sceneFog').name('Global Fog').onChange(v => {
-        if (!v && typeof scene !== 'undefined' && scene.fog) {
-            scene.fog.near = 100000;
-            scene.fog.far = 200000;
-        }
-    });
-    envFolder.add(params, 'fogIntensity', 0.1, 5.0, 0.1).name('Fog Intensity');
-    envFolder.add(params, 'wind').name('Wind').onChange(v => { if(isWindOn !== v) document.getElementById('wind-toggle').click(); });
-    const rainFolder = envFolder.addFolder('Rain Settings');
-    params.rainSize = 2.0;
-    params.rainIntensity = 1.0;
-    params.rainWindX = 1.0;
-    params.rainWindY = 0.5;
-    rainFolder.add(params, 'rain').name('Enable Rain').onChange(v => { isRainOn = v; });
-    rainFolder.add(params, 'rainSize', 0.5, 10.0).name('Drop Size');
-    rainFolder.add(params, 'rainIntensity', 0.1, 5.0).name('Intensity');
-    rainFolder.add(params, 'rainWindX', -5.0, 5.0).name('Wind X');
-    rainFolder.add(params, 'rainWindY', -5.0, 5.0).name('Wind Z');
-    window.biomeFogSettings = window.biomeFogSettings || {};
-    const fogFolder = envFolder.addFolder('Ground Fog');
-    fogFolder.add(params, 'fogPlane').name('Enable Fog').onChange(v => { if(typeof window.fogGroup !== 'undefined') window.fogGroup.visible = v; });
-    params.biomeFogOffset = 0;
-    const fogOffsetCtrl = fogFolder.add(params, 'biomeFogOffset', -50, 50).name('Biome Fog Offset').onChange(v => {
-        if (typeof playerGrp !== 'undefined') {
-            const bName = getBiomeAt(playerGrp.position.x, playerGrp.position.z).name;
-            window.biomeFogSettings[bName] = v;
-        }
-    });
-    // Add an interval to update the slider when biome changes
-    setInterval(() => {
-        if (typeof playerGrp !== 'undefined' && !fogOffsetCtrl.__onChangeBlocked) {
-            const bName = getBiomeAt(playerGrp.position.x, playerGrp.position.z).name;
-            const currentOffset = window.biomeFogSettings[bName] || 0;
-            if (params.biomeFogOffset !== currentOffset) {
-                params.biomeFogOffset = currentOffset;
-                fogOffsetCtrl.__onChangeBlocked = true; // Prevent triggering onChange and writing back
-                fogOffsetCtrl.updateDisplay();
-                fogOffsetCtrl.__onChangeBlocked = false;
-            }
-            fogFolder.title('Ground Fog (' + bName + ')');
-        }
-    }, 500);
-
-    envFolder.add(params, 'trails').name('Wind Trails').onChange(v => isWindTrailsOn = v);
-
-    envFolder.add(params, 'shadeMode', ['original', 'cel', 'flat'])
-        .name('🎨 Shade Mode')
-        .onChange(v => {
-            toonShaderManager.apply(scene, v);
-            gui.controllersRecursive().forEach(c => { if (c.property === 'shadeMode') c.updateDisplay(); });
-        });
-
-    const debugFolder = gui.addFolder('🔧 Debug Render');
+    const debugFolder = gui.addFolder('Debug Render');
     debugFolder.add(params, 'showTerrain').name('Terrain').onChange(v => { terrain.visible = v; });
 
     // Water Master Toggle & Shader Toggles
@@ -860,7 +1234,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         activateWaterShader(params.waterMode, v);
     });
 
-    const waterShaderFolder = debugFolder.addFolder('🌊 Water Shaders');
+    const waterShaderFolder = debugFolder.addFolder('Water Shaders');
     let debugWaterDropdownController;
     const shaderToggleControllers = {};
 
@@ -920,19 +1294,6 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         if(window.instJungleTreeParts) window.instJungleTreeParts.forEach(m => m.visible = v); 
         if(window.instPalmTreeParts) window.instPalmTreeParts.forEach(m => m.visible = v); 
     });
-    function updateCloudScale(instMesh, newMulti, oldMulti) {
-        if (typeof instMesh === 'undefined') return;
-        const ratio = newMulti / oldMulti;
-        const dummy = new THREE.Object3D();
-        for (let i = 0; i < instMesh.count; i++) {
-            instMesh.getMatrixAt(i, dummy.matrix);
-            dummy.matrix.decompose(dummy.position, dummy.quaternion, dummy.scale);
-            dummy.scale.multiplyScalar(ratio);
-            dummy.updateMatrix();
-            instMesh.setMatrixAt(i, dummy.matrix);
-        }
-        instMesh.instanceMatrix.needsUpdate = true;
-    }
     debugFolder.add(params, 'showBirds').name('Birds').onChange(v => { if(typeof instBirds !== 'undefined') instBirds.visible = v; if(typeof flockGrp !== 'undefined') flockGrp.visible = v; });
     debugFolder.add(params, 'showFogPlanes').name('Fog Planes').onChange(v => { if(typeof window.fogGroup !== 'undefined') window.fogGroup.visible = v; });
     debugFolder.add(params, 'showCrystals').name('Crystals').onChange(v => { instCrystals.visible = v; });
@@ -1580,29 +1941,41 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             vec3 norm = normalize(vNormal);
             vec3 lightDir = normalize(uSunDir);
             vec3 halfDir = normalize(lightDir + viewDir);
-            vec3 ref = reflect(-viewDir, norm);
+            float lightFacing = clamp(dot(norm, lightDir), 0.0, 1.0);
+            float nDotH = clamp(dot(norm, halfDir), 0.0, 1.0);
             
             // 1. Detect Sand / Warm Dune Surface (explicit attribute)
             float isSand = step(0.9, vBiomeType) * step(vBiomeType, 1.1);
             
             if (isSand > 0.1) {
-                float rim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
-                float rimStrength = pow(rim, 4.5) * 0.5;
-                vec3 rimGlow = vec3(1.0, 0.72, 0.38) * rimStrength;
-                
-                float mainSpec = clamp(dot(ref, halfDir), 0.0, 1.0);
-                mainSpec = pow(mainSpec, 20.0) * 4.5;
+                // Procedural micro sand ripples aligned perpendicular to wind (cos=0.796, sin=0.605)
+                vec2 duneUV = vec2(vWorldPos.x * 0.796 + vWorldPos.z * 0.605, -vWorldPos.x * 0.605 + vWorldPos.z * 0.796);
+                float rippleWarp = sin(duneUV.y * 0.08) * 1.5;
+                float ripplePattern = sin(duneUV.x * 0.45 + rippleWarp);
+                float rippleRaking = clamp(ripplePattern * 0.10 * (1.2 - lightFacing * 0.8), -0.08, 0.08);
+                gl_FragColor.rgb *= (1.0 + rippleRaking);
 
-                vec2 sandUV1 = vWorldPos.xz * 0.07 + uTime * 0.003;
-                vec2 sandUV2 = vWorldPos.xz * 0.18 - uTime * 0.006;
-                float textureGlitter = texture2D(uSandNoiseMap, sandUV1).r * 0.7 + texture2D(uSandNoiseMap, sandUV2).g * 0.5;
-                textureGlitter = pow(clamp(textureGlitter, 0.0, 1.0), 2.2);
+                // Dune Rim Lighting (Fresnel glow along grazing angles and dune ridges)
+                float rim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
+                float rimStrength = pow(rim, 4.0) * (lightFacing * 0.7 + 0.3) * 0.40;
+                vec3 rimGlow = vec3(1.0, 0.75, 0.42) * rimStrength;
+                
+                // Journey Sand Specular Glitter (Sparkling diamond grains)
+                float mainSpec = pow(nDotH, 24.0) * lightFacing * 0.85;
+
+                vec2 sandUV1 = vWorldPos.xz * 0.08 + uTime * 0.003;
+                vec2 sandUV2 = vWorldPos.xz * 0.22 - uTime * 0.005;
+                float textureGlitter = texture2D(uSandNoiseMap, sandUV1).r * 0.65 + texture2D(uSandNoiseMap, sandUV2).g * 0.55;
+                textureGlitter = pow(clamp(textureGlitter, 0.0, 1.0), 3.0);
                 mainSpec *= textureGlitter;
 
-                float rimSpec = pow(rim, 2.2) * textureGlitter * 2.5;
-                vec3 specColor = (mainSpec + rimSpec) * vec3(1.0, 0.82, 0.55) * uShimmerMult;
+                float rimSpec = pow(rim, 3.0) * textureGlitter * lightFacing * 0.45;
+                vec3 specColor = (mainSpec + rimSpec) * vec3(1.0, 0.85, 0.58) * uShimmerMult;
                 
-                gl_FragColor.rgb += (rimGlow * 0.5 + specColor) * isSand;
+                // Warm ambient terracotta backscatter in dune shadows
+                vec3 warmBackscatter = vec3(0.08, 0.03, 0.01) * (1.0 - lightFacing);
+                
+                gl_FragColor.rgb += (rimGlow + specColor + warmBackscatter) * isSand;
             }
 
             // 2. Detect Snow / North Pole Glacial Surface (explicit attribute)
@@ -1610,20 +1983,19 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             
             if (isSnow > 0.1) {
                 float snowRim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
-                float snowRimStrength = pow(snowRim, 4.0) * 0.35;
+                float snowRimStrength = pow(snowRim, 4.0) * (lightFacing * 0.7 + 0.3) * 0.25;
                 vec3 snowRimGlow = vec3(0.65, 0.85, 1.0) * snowRimStrength;
                 
-                float mainSnowSpec = clamp(dot(ref, halfDir), 0.0, 1.0);
-                mainSnowSpec = pow(mainSnowSpec, 18.0) * 4.0;
+                float mainSnowSpec = pow(nDotH, 20.0) * lightFacing * 0.7;
 
                 vec2 snowUV1 = vWorldPos.xz * 0.12 + uTime * 0.005;
-                vec2 snowUV2 = vWorldPos.xz * 0.23 - uTime * 0.008;
-                float snowGlitter = texture2D(uSandNoiseMap, snowUV1).r * 0.7 + texture2D(uSandNoiseMap, snowUV2).g * 0.55;
-                snowGlitter = pow(clamp(snowGlitter, 0.0, 1.0), 2.5);
+                vec2 snowUV2 = vWorldPos.xz * 0.28 - uTime * 0.007;
+                float snowGlitter = texture2D(uSandNoiseMap, snowUV1).r * 0.65 + texture2D(uSandNoiseMap, snowUV2).g * 0.55;
+                snowGlitter = pow(clamp(snowGlitter, 0.0, 1.0), 3.0);
                 mainSnowSpec *= snowGlitter;
 
-                float snowRimSpec = pow(snowRim, 2.2) * snowGlitter * 2.5;
-                vec3 snowSpecColor = (mainSnowSpec + snowRimSpec) * vec3(0.85, 0.95, 1.0) * 1.2 * uShimmerMult;
+                float snowRimSpec = pow(snowRim, 3.0) * snowGlitter * lightFacing * 0.35;
+                vec3 snowSpecColor = (mainSnowSpec + snowRimSpec) * vec3(0.85, 0.95, 1.0) * uShimmerMult;
                 
                 gl_FragColor.rgb += (snowRimGlow + snowSpecColor) * isSnow;
             }
@@ -5059,13 +5431,6 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     const tempColorTarget = new THREE.Color();
     const quatIdentity = new THREE.Quaternion();
 
-    let envConfigs = [
-        {bg: 0x8cbce6, fog: 0x8cbce6, amb: 0xdcf2ff, dir: 0xfffaeb, ambI: 0.9, dirI: 2.5, starOp: 0, sunY: 2500, moonY: -1500, glintCol: 0xfff0d0, cloudCol: 0xfffaec}, // Day (high sun)
-        {bg: 0xff5a18, fog: 0xd45012, amb: 0xff8833, dir: 0xff6600, ambI: 1.2, dirI: 3.5, starOp: 0, sunY: 600, moonY: 200, glintCol: 0xff7a00, cloudCol: 0xff9040}, // Dusk / Golden Hour (warm horizon sunset)
-        {bg: 0x162d5a, fog: 0x224888, amb: 0x7788bb, dir: 0xffbb55, ambI: 1.5, dirI: 3.5, starOp: 1.0, sunY: -8000, moonY: 2200, glintCol: 0xffaa44, cloudCol: 0x2e4a80}, // Twilight / Night (Moon high)
-    ];
-    let currentSunY = 1500;
-    let currentMoonY = -1500;
     let currentFps = 60;
 
     let lastFpsTime = performance.now();
@@ -5337,7 +5702,6 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
 
         if (playerPhysics) {
             playerPhysics.update(dt, inputState, isBraking, isBoosting, isFlightPaused, treeGrid);
-            
             if (cameraManager) {
                 cameraManager.update(dt, playerGrp, playerPhysics.currentYaw, isBoosting);
                 if (isGodMode && godControls) godControls.update();
@@ -5349,12 +5713,16 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         }
     
 
-        // Keep the physical sun and flare exactly 20,000 units away directly in front of the player's flight path
+        // Keep the physical sun and flare positioned at configured distance and azimuth
         const decaySunY = 1.0 - Math.exp(-2.0 * dt);
         currentSunY += (target.sunY - currentSunY) * decaySunY;
         currentMoonY += (target.moonY - currentMoonY) * decaySunY;
 
-        tempVecSunFwd.set(0, 0, -20000);
+        const sDist = params.sunDistance || 20000;
+        tempVecSunFwd.set(0, 0, -sDist);
+        if (params.sunAzimuth) {
+            tempVecSunFwd.applyAxisAngle(new THREE.Vector3(0, 1, 0), params.sunAzimuth * (Math.PI / 180));
+        }
         if (params.lockSunToPlayer) { tempVecSunFwd.applyQuaternion(playerGrp.quaternion); }
 
         // Sun positioning & visibility
@@ -5505,8 +5873,6 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         composer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    let timePhase = parseInt(localStorage.getItem('wl_timePhase')) || 0; // 0: Day, 1: Dusk, 2: Deep Twilight
-    
     // ... lighting targets for lerping
     const envTargets = {
         bg: new THREE.Color(),
@@ -5851,389 +6217,8 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     currentFrame = 0;
     logicTimer = 0;
 
-    // Atmosphere Editor (Appended to lil-gui)
+    // System Settings (Save / Load) and GUI Docking
     if (typeof gui !== 'undefined') {
-        const atmoParams = {
-            skyColor: '#' + envConfigs[0].bg.toString(16).padStart(6, '0'),
-            fogColor: '#' + envConfigs[0].fog.toString(16).padStart(6, '0'),
-            ambColor: '#' + envConfigs[0].amb.toString(16).padStart(6, '0'),
-            dirColor: '#' + envConfigs[0].dir.toString(16).padStart(6, '0'),
-            ambI: envConfigs[0].ambI,
-            dirI: envConfigs[0].dirI,
-            glintCol: '#' + envConfigs[0].glintCol.toString(16).padStart(6, '0')
-        };
-        
-        function updateAtmoParamsFromPhase() {
-            const cur = envConfigs[timePhase];
-            atmoParams.skyColor = '#' + cur.bg.toString(16).padStart(6, '0');
-            atmoParams.fogColor = '#' + cur.fog.toString(16).padStart(6, '0');
-            atmoParams.ambColor = '#' + cur.amb.toString(16).padStart(6, '0');
-            atmoParams.dirColor = '#' + cur.dir.toString(16).padStart(6, '0');
-            atmoParams.ambI = cur.ambI;
-            atmoParams.dirI = cur.dirI;
-            atmoParams.glintCol = '#' + cur.glintCol.toString(16).padStart(6, '0');
-            // Refresh GUI display without triggering onChange
-            if (atmoFolder) {
-                atmoFolder.controllers.forEach(c => c.updateDisplay());
-            }
-        }
-        
-        // Listen to phase changes
-        const oldTimeToggle = document.getElementById('time-toggle').onclick;
-        document.getElementById('time-toggle').addEventListener('click', () => {
-            setTimeout(updateAtmoParamsFromPhase, 50);
-        });
-
-        const atmoFolder = gui.addFolder('Atmosphere');
-
-        // Per-biome procedural sky editor
-        const skyEditorParams = {
-            coverage: 0.45, edge: 0.07, speed: 0.02,
-            skyZenith: '#4a90d9', skyHorizon: '#b8d4e8',
-            cloudCol: '#fff8f0', cloudShadow: '#8898a8',
-            turbulence: 0.0, stormDarken: 0.0,
-            weather: 'clear'
-        };
-        const skyFolder = atmoFolder.addFolder('Procedural Sky (Per Biome)');
-
-        function writeSkyToConfig(key, val) {
-            if (typeof playerGrp !== 'undefined') {
-                const bName = getBiomeAt(playerGrp.position.x, playerGrp.position.z).name;
-                if (BIOME_SKY_CONFIGS[bName]) BIOME_SKY_CONFIGS[bName][key] = val;
-            }
-        }
-        const skyCtrlCoverage = skyFolder.add(skyEditorParams, 'coverage', 0, 1, 0.01).name('Cloud Coverage').onChange(v => writeSkyToConfig('coverage', v));
-        const skyCtrlEdge = skyFolder.add(skyEditorParams, 'edge', 0.02, 0.25, 0.005).name('Cloud Edge').onChange(v => writeSkyToConfig('edge', v));
-        const skyCtrlSpeed = skyFolder.add(skyEditorParams, 'speed', 0, 0.2, 0.002).name('Cloud Speed').onChange(v => writeSkyToConfig('speed', v));
-        const skyCtrlZenith = skyFolder.addColor(skyEditorParams, 'skyZenith').name('Sky Zenith').onChange(v => writeSkyToConfig('skyZenith', parseInt(v.replace('#',''), 16)));
-        const skyCtrlHorizon = skyFolder.addColor(skyEditorParams, 'skyHorizon').name('Sky Horizon').onChange(v => writeSkyToConfig('skyHorizon', parseInt(v.replace('#',''), 16)));
-        const skyCtrlCloudCol = skyFolder.addColor(skyEditorParams, 'cloudCol').name('Cloud Color').onChange(v => writeSkyToConfig('cloudCol', parseInt(v.replace('#',''), 16)));
-        const skyCtrlCloudShadow = skyFolder.addColor(skyEditorParams, 'cloudShadow').name('Cloud Shadow').onChange(v => writeSkyToConfig('cloudShadow', parseInt(v.replace('#',''), 16)));
-        const skyCtrlTurb = skyFolder.add(skyEditorParams, 'turbulence', 0, 1, 0.01).name('Storm Turbulence').onChange(v => writeSkyToConfig('turbulence', v));
-        const skyCtrlDarken = skyFolder.add(skyEditorParams, 'stormDarken', 0, 1, 0.01).name('Storm Darken').onChange(v => writeSkyToConfig('stormDarken', v));
-        skyFolder.add({ opacity: 1.0 }, 'opacity', 0, 1, 0.01).name('Cloud Opacity').onChange(v => { skyUniforms.uCloudOpacity.value = v; });
-        skyFolder.add(skyEditorParams, 'weather', ['clear', 'storm', 'overcast']).name('Weather').onChange(v => { currentWeather = v; });
-
-        // Update sliders when biome changes (same pattern as Ground Fog)
-        setInterval(() => {
-            if (typeof playerGrp !== 'undefined') {
-                const bName = getBiomeAt(playerGrp.position.x, playerGrp.position.z).name;
-                const cfg = BIOME_SKY_CONFIGS[bName];
-                if (cfg) {
-                    skyEditorParams.coverage = cfg.coverage;
-                    skyEditorParams.edge = cfg.edge;
-                    skyEditorParams.speed = cfg.speed;
-                    skyEditorParams.skyZenith = '#' + cfg.skyZenith.toString(16).padStart(6, '0');
-                    skyEditorParams.skyHorizon = '#' + cfg.skyHorizon.toString(16).padStart(6, '0');
-                    skyEditorParams.cloudCol = '#' + cfg.cloudCol.toString(16).padStart(6, '0');
-                    skyEditorParams.cloudShadow = '#' + cfg.cloudShadow.toString(16).padStart(6, '0');
-                    skyEditorParams.turbulence = cfg.turbulence;
-                    skyEditorParams.stormDarken = cfg.stormDarken;
-                    [skyCtrlCoverage, skyCtrlEdge, skyCtrlSpeed, skyCtrlZenith, skyCtrlHorizon, skyCtrlCloudCol, skyCtrlCloudShadow, skyCtrlTurb, skyCtrlDarken].forEach(c => c.updateDisplay());
-                    skyFolder.title('Procedural Sky (' + bName + ')');
-                }
-            }
-        }, 500);
-
-        atmoFolder.addColor(atmoParams, 'skyColor').name('Sky Color').onChange(v => envConfigs[timePhase].bg = parseInt(v.replace('#',''), 16));
-        atmoFolder.addColor(atmoParams, 'fogColor').name('Fog Color').onChange(v => envConfigs[timePhase].fog = parseInt(v.replace('#',''), 16));
-        atmoFolder.addColor(atmoParams, 'ambColor').name('Ambient Light').onChange(v => envConfigs[timePhase].amb = parseInt(v.replace('#',''), 16));
-        atmoFolder.addColor(atmoParams, 'dirColor').name('Sun Light').onChange(v => envConfigs[timePhase].dir = parseInt(v.replace('#',''), 16));
-        atmoFolder.add(atmoParams, 'ambI', 0, 3).name('Amb Intensity').onChange(v => {
-            envConfigs[timePhase].ambI = v;
-            ambientLight.intensity = v;
-        });
-        atmoFolder.add(atmoParams, 'dirI', 0, 5).name('Sun Intensity').onChange(v => {
-            envConfigs[timePhase].dirI = v;
-            dirLight.intensity = v;
-        });
-        atmoFolder.addColor(atmoParams, 'glintCol').name('Water Glint').onChange(v => envConfigs[timePhase].glintCol = parseInt(v.replace('#',''), 16));
-        
-        // Dedicated Moonlight & Night Editor
-        const moonParams = {
-            moonlightColor: '#' + envConfigs[2].dir.toString(16).padStart(6, '0'),
-            moonlightIntensity: envConfigs[2].dirI,
-            nightAmbColor: '#' + envConfigs[2].amb.toString(16).padStart(6, '0'),
-            nightAmbIntensity: envConfigs[2].ambI,
-            nightSkyColor: '#' + envConfigs[2].bg.toString(16).padStart(6, '0'),
-            nightFogColor: '#' + envConfigs[2].fog.toString(16).padStart(6, '0'),
-            moonAltitude: envConfigs[2].moonY
-        };
-
-        const moonFolder = atmoFolder.addFolder('Moonlight & Night');
-        moonFolder.add(params, 'exposure', 0.5, 4.0, 0.1).name('Global Brightness').onChange(v => {
-            renderer.toneMappingExposure = v;
-        });
-        moonFolder.addColor(moonParams, 'moonlightColor').name('Moonlight Color').onChange(v => envConfigs[2].dir = parseInt(v.replace('#',''), 16));
-        moonFolder.add(moonParams, 'moonlightIntensity', 0, 10, 0.1).name('Moonlight Power').onChange(v => envConfigs[2].dirI = v);
-        moonFolder.addColor(moonParams, 'nightAmbColor').name('Night Fill Color').onChange(v => envConfigs[2].amb = parseInt(v.replace('#',''), 16));
-        moonFolder.add(moonParams, 'nightAmbIntensity', 0, 5, 0.1).name('Night Fill Power').onChange(v => envConfigs[2].ambI = v);
-        moonFolder.addColor(moonParams, 'nightSkyColor').name('Night Sky Color').onChange(v => envConfigs[2].bg = parseInt(v.replace('#',''), 16));
-        moonFolder.addColor(moonParams, 'nightFogColor').name('Night Fog Color').onChange(v => envConfigs[2].fog = parseInt(v.replace('#',''), 16));
-        moonFolder.add(moonParams, 'moonAltitude', 200, 4000, 50).name('Moon Altitude').onChange(v => envConfigs[2].moonY = v);
-
-        // Kiki Warm Side Glow Editor
-        const kikiGlowParams = {
-            intensity: 2.5,
-            distance: 300,
-            spread: 35,
-            color: '#ffaa44'
-        };
-        const glowFolder = envFolder.addFolder('Kiki Warm Side Glow');
-        glowFolder.add(kikiGlowParams, 'intensity', 0, 8, 0.1).name('Glow Power').onChange(v => {
-            kikiLeftLight.intensity = v;
-            kikiRightLight.intensity = v;
-        });
-        glowFolder.add(kikiGlowParams, 'distance', 50, 800, 10).name('Glow Range').onChange(v => {
-            kikiLeftLight.distance = v;
-            kikiRightLight.distance = v;
-        });
-        glowFolder.add(kikiGlowParams, 'spread', 5, 100, 1).name('Side Spread').onChange(v => {
-            kikiLeftLight.position.x = -v;
-            kikiRightLight.position.x = v;
-        });
-        glowFolder.addColor(kikiGlowParams, 'color').name('Glow Color').onChange(v => {
-            const col = new THREE.Color(v);
-            kikiLeftLight.color.copy(col);
-            kikiRightLight.color.copy(col);
-        });
-        
-        // Cloud Editor
-        const cloudParams = {
-            c0: '#' + pastelColors[0].toString(16).padStart(6, '0'),
-            c1: '#' + pastelColors[1].toString(16).padStart(6, '0'),
-            c2: '#' + pastelColors[2].toString(16).padStart(6, '0'),
-            c3: '#' + pastelColors[3].toString(16).padStart(6, '0'),
-            c4: '#' + pastelColors[4].toString(16).padStart(6, '0'),
-            opBase: 1.0,
-            opHigh: 1.0,
-            opWispy: 1.0,
-            opMega: 1.0,
-            opHorizon: 1.0,
-            enableClouds: true,
-            density: 1.0,
-            cloudScale: 1.0
-        };
-        
-        let oldCloudColors = [...pastelColors];
-        function updateCloudColorForIndex(idx, newHex) {
-            const oldHex = oldCloudColors[idx];
-            const newHexVal = parseInt(newHex.replace('#',''), 16);
-            if (oldHex === newHexVal) return;
-            pastelColors[idx] = newHexVal;
-            const oldColor = new THREE.Color(oldHex);
-            const newColor = new THREE.Color(newHexVal);
-            const temp = new THREE.Color();
-            
-            [instClouds, instHighClouds].forEach(mesh => {
-                for (let i = 0; i < mesh.count; i++) {
-                    mesh.getColorAt(i, temp);
-                    if (Math.abs(temp.r - oldColor.r) < 0.01 && Math.abs(temp.g - oldColor.g) < 0.01 && Math.abs(temp.b - oldColor.b) < 0.01) {
-                        mesh.setColorAt(i, newColor);
-                    }
-                }
-                if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-            });
-            oldCloudColors[idx] = newHexVal;
-        }
-
-        const cloudFolder = gui.addFolder('Cloud Editor');
-        
-        // Show All Clouds Toggle
-        cloudFolder.add(params, 'showClouds').name('Show All Clouds').onChange(v => {
-            params.showCloudsRegular = v;
-            params.showCloudsHigh = v;
-            params.showCloudsWispy = v;
-            params.showCloudsMega = v;
-            params.showCloudsHorizon = v;
-            params.showProceduralClouds = v;
-            params.showVolumetricClouds = v;
-            if (typeof instClouds !== 'undefined') instClouds.visible = v;
-            if (typeof instHighClouds !== 'undefined') instHighClouds.visible = v;
-            if (typeof instWispyClouds !== 'undefined') instWispyClouds.visible = v;
-            if (typeof instMegaClouds !== 'undefined') instMegaClouds.visible = v;
-            if (typeof instHorizonClouds1 !== 'undefined') {
-                instHorizonClouds1.visible = v;
-                instHorizonClouds2.visible = v;
-                instHorizonClouds3.visible = v;
-            }
-            if (typeof toonCloudMat !== 'undefined' && toonCloudMat && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) {
-                toonCloudMat.uniforms.uEnableClouds.value = v ? 1.0 : 0.0;
-            }
-            if (typeof skyUniforms !== 'undefined' && skyUniforms && skyUniforms.uCloudOpacity) {
-                skyUniforms.uCloudOpacity.value = v ? 1.0 : 0.0;
-            }
-            cloudFolder.controllersRecursive().forEach(c => {
-                if (c.property && (c.property.startsWith('showClouds') || c.property === 'showVolumetricClouds' || c.property === 'showProceduralClouds')) {
-                    c.updateDisplay();
-                }
-            });
-        });
-
-        // 1. Regular Cumulus Clouds Editor
-        const regFolder = cloudFolder.addFolder('Regular Cumulus Clouds');
-        regFolder.add(params, 'showCloudsRegular').name('Show').onChange(v => { if (typeof instClouds !== 'undefined') instClouds.visible = v; });
-        regFolder.add(params, 'cloudCountRegular', 0, 300, 1).name('Count').onChange(v => {
-            CLOUD_COUNT = v;
-            if (instClouds) {
-                instClouds.count = v;
-                if (instClouds.instanceMatrix) instClouds.instanceMatrix.needsUpdate = true;
-            }
-        });
-        let prevRegScale = params.cloudScaleRegular || 1.0;
-        regFolder.add(params, 'cloudScaleRegular', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
-            updateCloudScale(instClouds, v, prevRegScale);
-            prevRegScale = v;
-        });
-        regFolder.add(cloudParams, 'opBase', 0, 1, 0.01).name('Opacity').onChange(v => { if (typeof matCloud !== 'undefined') matCloud.opacity = v; });
-        regFolder.close();
-
-        // 2. Cumulonimbus Clouds Editor
-        const highFolder = cloudFolder.addFolder('Cumulonimbus Clouds');
-        highFolder.add(params, 'showCloudsHigh').name('Show').onChange(v => { if (typeof instHighClouds !== 'undefined') instHighClouds.visible = v; });
-        highFolder.add(params, 'cloudCountHigh', 0, 100, 1).name('Count').onChange(v => {
-            HIGH_CLOUD_COUNT = v;
-            if (instHighClouds) {
-                instHighClouds.count = v;
-                if (instHighClouds.instanceMatrix) instHighClouds.instanceMatrix.needsUpdate = true;
-            }
-        });
-        let prevHighScale = params.cloudScaleHigh || 1.0;
-        highFolder.add(params, 'cloudScaleHigh', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
-            updateCloudScale(instHighClouds, v, prevHighScale);
-            prevHighScale = v;
-        });
-        highFolder.add(cloudParams, 'opHigh', 0, 1, 0.01).name('Opacity').onChange(v => { if (typeof highCloudMat !== 'undefined') highCloudMat.opacity = v; });
-        highFolder.close();
-
-        // 3. Wispy Clouds Editor
-        const wispyFolder = cloudFolder.addFolder('Wispy Clouds');
-        wispyFolder.add(params, 'showCloudsWispy').name('Show').onChange(v => { if (typeof instWispyClouds !== 'undefined') instWispyClouds.visible = v; });
-        wispyFolder.add(params, 'cloudCountWispy', 0, 100, 1).name('Count').onChange(v => {
-            WISPY_CLOUD_COUNT = v;
-            if (instWispyClouds) {
-                instWispyClouds.count = v;
-                if (instWispyClouds.instanceMatrix) instWispyClouds.instanceMatrix.needsUpdate = true;
-            }
-        });
-        let prevWispyScale = params.cloudScaleWispy || 1.0;
-        wispyFolder.add(params, 'cloudScaleWispy', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
-            updateCloudScale(instWispyClouds, v, prevWispyScale);
-            prevWispyScale = v;
-        });
-        wispyFolder.add(cloudParams, 'opWispy', 0, 1, 0.01).name('Opacity').onChange(v => { if (typeof matWispyCloud !== 'undefined') matWispyCloud.opacity = v; });
-        wispyFolder.close();
-
-        // 4. Mega Clouds Editor
-        const megaFolder = cloudFolder.addFolder('Mega Clouds');
-        megaFolder.add(params, 'showCloudsMega').name('Show').onChange(v => { if (typeof instMegaClouds !== 'undefined') instMegaClouds.visible = v; });
-        megaFolder.add(params, 'cloudCountMega', 0, 100, 1).name('Count').onChange(v => {
-            MEGA_CLOUD_COUNT = v;
-            if (instMegaClouds) {
-                instMegaClouds.count = v;
-                if (instMegaClouds.instanceMatrix) instMegaClouds.instanceMatrix.needsUpdate = true;
-            }
-        });
-        let prevMegaScale = params.cloudScaleMega || 1.0;
-        megaFolder.add(params, 'cloudScaleMega', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
-            updateCloudScale(instMegaClouds, v, prevMegaScale);
-            prevMegaScale = v;
-        });
-        megaFolder.add(cloudParams, 'opMega', 0, 1, 0.01).name('Opacity').onChange(v => { if (typeof megaCloudMat !== 'undefined') megaCloudMat.opacity = v; });
-        megaFolder.close();
-
-        // 5. Horizon Clouds Editor
-        const horizonFolder = cloudFolder.addFolder('Horizon Clouds');
-        horizonFolder.add(params, 'showCloudsHorizon').name('Show').onChange(v => { 
-            if (typeof instHorizonClouds1 !== 'undefined') {
-                instHorizonClouds1.visible = v;
-                instHorizonClouds2.visible = v;
-                instHorizonClouds3.visible = v;
-            }
-        });
-        horizonFolder.add(params, 'cloudCountHorizon', 0, 100, 1).name('Count').onChange(v => {
-            if (typeof instHorizonClouds1 !== 'undefined') {
-                instHorizonClouds1.count = v;
-                instHorizonClouds2.count = v;
-                instHorizonClouds3.count = v;
-                if (instHorizonClouds1.instanceMatrix) instHorizonClouds1.instanceMatrix.needsUpdate = true;
-                if (instHorizonClouds2.instanceMatrix) instHorizonClouds2.instanceMatrix.needsUpdate = true;
-                if (instHorizonClouds3.instanceMatrix) instHorizonClouds3.instanceMatrix.needsUpdate = true;
-            }
-        });
-        let prevHorizonScale = params.cloudScaleHorizon || 1.0;
-        horizonFolder.add(params, 'cloudScaleHorizon', 0.1, 5.0, 0.05).name('Scale').onChange(v => {
-            if (typeof instHorizonClouds1 !== 'undefined') updateCloudScale(instHorizonClouds1, v, prevHorizonScale);
-            if (typeof instHorizonClouds2 !== 'undefined') updateCloudScale(instHorizonClouds2, v, prevHorizonScale);
-            if (typeof instHorizonClouds3 !== 'undefined') updateCloudScale(instHorizonClouds3, v, prevHorizonScale);
-            prevHorizonScale = v;
-        });
-        horizonFolder.close();
-
-        // 6. Procedural Sky Clouds Editor
-        const procFolder = cloudFolder.addFolder('Procedural Sky Clouds');
-        procFolder.add(params, 'showProceduralClouds').name('Show').onChange(v => {
-            if (typeof skyUniforms !== 'undefined' && skyUniforms && skyUniforms.uCloudOpacity) {
-                skyUniforms.uCloudOpacity.value = v ? 1.0 : 0.0;
-            }
-        });
-        if (typeof skyUniforms !== 'undefined' && skyUniforms) {
-            if (skyUniforms.uCloudCoverage) procFolder.add(skyUniforms.uCloudCoverage, 'value', 0.0, 1.0, 0.01).name('Coverage');
-            if (skyUniforms.uCloudOpacity) procFolder.add(skyUniforms.uCloudOpacity, 'value', 0.0, 1.0, 0.01).name('Opacity');
-            if (skyUniforms.uCloudSpeed) procFolder.add(skyUniforms.uCloudSpeed, 'value', 0.0, 0.1, 0.001).name('Speed');
-            if (skyUniforms.uCloudTurbulence) procFolder.add(skyUniforms.uCloudTurbulence, 'value', 0.0, 1.0, 0.01).name('Turbulence');
-        }
-        procFolder.close();
-
-        // 7. Volumetric Raymarched Clouds Editor
-        const volFolder = cloudFolder.addFolder('Volumetric Raymarched Clouds');
-        volFolder.add(params, 'showVolumetricClouds').name('Show').onChange(v => {
-            if (typeof toonCloudMat !== 'undefined' && toonCloudMat && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) {
-                toonCloudMat.uniforms.uEnableClouds.value = v ? 1.0 : 0.0;
-            }
-        });
-        volFolder.close();
-
-        // 8. Pastel Color Palette
-        const paletteFolder = cloudFolder.addFolder('Cloud Colors');
-        paletteFolder.addColor(cloudParams, 'c0').name('Color 1').onChange(v => updateCloudColorForIndex(0, v));
-        paletteFolder.addColor(cloudParams, 'c1').name('Color 2').onChange(v => updateCloudColorForIndex(1, v));
-        paletteFolder.addColor(cloudParams, 'c2').name('Color 3').onChange(v => updateCloudColorForIndex(2, v));
-        paletteFolder.addColor(cloudParams, 'c3').name('Color 4').onChange(v => updateCloudColorForIndex(3, v));
-        paletteFolder.addColor(cloudParams, 'c4').name('Color 5').onChange(v => updateCloudColorForIndex(4, v));
-        paletteFolder.close();
-
-        // Tree Editor
-        const treeGreenVariations = [0x52c439, 0x38b000, 0x2d8028, 0x76e054, 0x6e4a32];
-        let oldTreeColors = [...treeGreenVariations];
-        function updateTreeColorForIndex(idx, newHex) {
-            const oldHex = oldTreeColors[idx];
-            const newHexVal = parseInt(newHex.replace('#',''), 16);
-            if (oldHex === newHexVal) return;
-            treeGreenVariations[idx] = newHexVal;
-            const oldColor = new THREE.Color(oldHex);
-            const newColor = new THREE.Color(newHexVal);
-            const temp = new THREE.Color();
-            
-            treeMeshes.forEach(mesh => {
-                const count = mesh.maxCount || mesh.count;
-                for (let i = 0; i < count; i++) {
-                    mesh.getColorAt(i, temp);
-                    if (Math.abs(temp.r - oldColor.r) < 0.01 && Math.abs(temp.g - oldColor.g) < 0.01 && Math.abs(temp.b - oldColor.b) < 0.01) {
-                        mesh.setColorAt(i, newColor);
-                    }
-                }
-                if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-            });
-            oldTreeColors[idx] = newHexVal;
-        }
-
-        const treeFolder = envFolder.addFolder('Global Tree Settings');
-        treeFolder.add(params, 'treeScale', 0.5, 4.0).name('Tree Scale').onChange(v => treeUniforms.uTreeScale.value = v);
-
-        // ==========================================
-        // SYSTEM SETTINGS (SAVE/LOAD)
-        // ==========================================
         perfFolder.add({
             saveSettings: () => {
                 const data = gui.save();
