@@ -315,6 +315,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     let currentSunY = 1500;
     let currentMoonY = -1500;
     let timePhase = parseInt(localStorage.getItem('wl_timePhase')) || 0; // 0: Day, 1: Dusk, 2: Deep Twilight
+    let playerGrp = null;
 
     const gui = new GUI();
     const params = {
@@ -4130,7 +4131,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     // ==========================================
     // 7. PLAYER SETUP
     // ==========================================
-    const playerGrp = new THREE.Group();
+    playerGrp = new THREE.Group();
     playerGrp.position.set(0, 50, 0);
     scene.add(playerGrp);
 

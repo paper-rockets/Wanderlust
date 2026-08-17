@@ -16,6 +16,12 @@ export const desertColors = {
     sandBase:       new THREE.Color(0xe88f38), // Warm radiant rich golden sand
     sandSunlit:     new THREE.Color(0xf2a144), // Slightly lighter sunlit sand
     sandPeak:       new THREE.Color(0xf7b65c), // Gentle peak highlight
+
+    // Color editor bindings
+    duneSlope:      new THREE.Color(0xe88f38), // Main sand color
+    valleyShadow:   new THREE.Color(0xd07828), // Sand shade
+    duneCrest:      new THREE.Color(0xf7b65c),
+    peakHighlight:  new THREE.Color(0xf7b65c)
 };
 
 export default {
@@ -81,7 +87,8 @@ export default {
 
         // 3. Unified Single Material Palette (no artificial dark brown stripes)
         // Uniform base sand with subtle elevation warmth
-        tempColor.copy(desertColors.sandBase);
+        const baseCol = desertColors.duneSlope || desertColors.sandBase;
+        tempColor.copy(baseCol);
         if (h > 25.0) {
             const peakFactor = ss(25.0, 75.0, h);
             tempColor.lerp(desertColors.sandSunlit, peakFactor * 0.7);
