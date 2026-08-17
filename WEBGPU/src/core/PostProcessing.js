@@ -25,10 +25,10 @@ export function initPostProcessing() {
 
 // -- Volumetric God Rays Settings (100% matched to flight-merged) --
 export const uSunScreenPos = uniform(vec2(0.5, 0.5));
-export const uIntensity = uniform(4.0);
-export const uDecay = uniform(0.935);
-export const uDensity = uniform(0.55);
-export const uWeight = uniform(0.80);
+export const uIntensity = uniform(1.8);
+export const uDecay = uniform(0.92);
+export const uDensity = uniform(0.50);
+export const uWeight = uniform(0.85);
 export const uSunVisible = uniform(1.0);
 export const uRayColor = uniform(new THREE.Color(0xffd580));
 export let isGodRaysEnabled = !LOW_GFX;
@@ -44,7 +44,7 @@ const buildGodRaysNode = Fn(([baseTex]) => {
 
     const deltaUV = vUv.sub(uSunScreenPos).toVar();
     const dist = length(deltaUV);
-    deltaUV.mulAssign(float(1.0 / 32.0).mul(uDensity));
+    deltaUV.mulAssign(float(1.0 / 16.0).mul(uDensity));
 
     const dither = ignDither(screenCoordinate.xy);
     const sampleUV = vUv.sub(deltaUV.mul(dither)).toVar();
@@ -52,7 +52,7 @@ const buildGodRaysNode = Fn(([baseTex]) => {
     const illumination = float(0.0).toVar();
     const currentWeight = float(uWeight).toVar();
 
-    Loop({ start: 0, end: 32 }, () => {
+    Loop({ start: 0, end: 16 }, () => {
         sampleUV.subAssign(deltaUV);
         const clampedUV = clamp(sampleUV, vec2(0.001), vec2(0.999));
 

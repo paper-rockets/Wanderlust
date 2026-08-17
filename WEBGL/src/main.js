@@ -2138,24 +2138,12 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         const biomeTypes = terrainGeo.attributes.aBiomeType;
         const norm = terrainGeo.attributes.normal;
 
-        for (let i = 0; i < pos.count; i++) {
+        const count = pos.count;
+        for (let i = 0; i < count; i++) {
             const worldX = pos.getX(i) + gridX;
             const worldZ = pos.getZ(i) + gridZ;
             const h = getWorldHeight(worldX, worldZ);
-            if (i === 0 && Math.random() < 0.05) console.log('Terrain H:', h, 'WorldX:', worldX, 'Colors:', tempColor);
             pos.setY(i, h);
-
-            getWorldColor(h, worldX, worldZ, tempColor);
-            colors.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
-
-            // Fast analytical heightmap normals (avoids expensive computeVertexNormals triangle pass)
-            const normDelta = 25.0;
-            const hL = getWorldHeight(worldX - normDelta, worldZ);
-            const hR = getWorldHeight(worldX + normDelta, worldZ);
-            const hD = getWorldHeight(worldX, worldZ - normDelta);
-            const hU = getWorldHeight(worldX, worldZ + normDelta);
-            tempVec1.set(hL - hR, normDelta * 2.0, hD - hU).normalize();
-            norm.setXYZ(i, tempVec1.x, tempVec1.y, tempVec1.z);
 
             getWorldColor(h, worldX, worldZ, tempColor);
             
@@ -2179,6 +2167,27 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             }
 
             colors.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
+        }
+
+        // Fast buffer-based analytical normal computation (zero extra noise evaluations)
+        const seg = terrainRes;
+        const Nx = seg + 1;
+        const spacing2 = (4000.0 / seg) * 2.0;
+        for (let row = 0; row < Nx; row++) {
+            const rowOffset = row * Nx;
+            const prevRowOffset = (row > 0 ? row - 1 : row) * Nx;
+            const nextRowOffset = (row < seg ? row + 1 : row) * Nx;
+
+            for (let col = 0; col < Nx; col++) {
+                const i = rowOffset + col;
+                const hL = pos.getY(rowOffset + (col > 0 ? col - 1 : col));
+                const hR = pos.getY(rowOffset + (col < seg ? col + 1 : col));
+                const hD = pos.getY(prevRowOffset + col);
+                const hU = pos.getY(nextRowOffset + col);
+
+                tempVec1.set(hL - hR, spacing2, hD - hU).normalize();
+                norm.setXYZ(i, tempVec1.x, tempVec1.y, tempVec1.z);
+            }
         }
         
         pos.needsUpdate = true;

@@ -21,7 +21,7 @@ export const renderer = new WebGPURenderer({
     forceWebGL: useWebGL
 });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(LOW_GFX ? 0.5 : Math.min(window.devicePixelRatio, 1.5));
+renderer.setPixelRatio(LOW_GFX ? 0.5 : Math.min(window.devicePixelRatio, 1.25));
 renderer.shadowMap.enabled = !LOW_GFX;
 renderer.shadowMap.type = LOW_GFX ? THREE.BasicShadowMap : THREE.PCFShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;

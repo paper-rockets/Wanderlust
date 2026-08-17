@@ -57,10 +57,10 @@ export const GodRaysShader = {
     uniforms: {
         tDiffuse: { value: null },
         uSunScreenPos: { value: new THREE.Vector2(0.5, 0.5) },
-        uIntensity: { value: 4.0 },
-        uDecay: { value: 0.935 },
-        uDensity: { value: 0.55 },
-        uWeight: { value: 0.80 },
+        uIntensity: { value: 1.8 },
+        uDecay: { value: 0.92 },
+        uDensity: { value: 0.50 },
+        uWeight: { value: 0.85 },
         uSunVisible: { value: 1.0 },
         uRayColor: { value: new THREE.Color(0xffd580) }
     },
@@ -93,7 +93,7 @@ export const GodRaysShader = {
 
             vec2 deltaUV = (vUv - uSunScreenPos);
             float dist = length(deltaUV);
-            deltaUV *= (1.0 / 32.0) * uDensity;
+            deltaUV *= (1.0 / 16.0) * uDensity;
 
             float dither = ignDither(gl_FragCoord.xy);
             vec2 sampleUV = vUv - (deltaUV * dither);
@@ -101,9 +101,10 @@ export const GodRaysShader = {
             float illumination = 0.0;
             float currentWeight = uWeight;
 
-            for(int i = 0; i < 32; i++) {
+            for (int i = 0; i < 16; i++) {
                 sampleUV -= deltaUV;
-                vec4 samp = texture2D(tDiffuse, sampleUV);
+                vec2 clampedUV = clamp(sampleUV, vec2(0.001), vec2(0.999));
+                vec4 samp = texture2D(tDiffuse, clampedUV);
                 float lum = dot(samp.rgb, vec3(0.299, 0.587, 0.114));
                 float distFromSun = length(sampleUV - uSunScreenPos);
                 float sunMask = 1.0 - smoothstep(0.02, 0.18, distFromSun);
@@ -113,7 +114,7 @@ export const GodRaysShader = {
             }
 
             float edgeFade = 1.0 - smoothstep(0.35, 1.6, dist);
-            vec3 rayColor = uRayColor * (illumination * uIntensity * edgeFade * uSunVisible);
+            vec3 rayColor = uRayColor * illumination * uIntensity * edgeFade * uSunVisible;
 
             gl_FragColor = vec4(texel.rgb + rayColor, texel.a);
         }
