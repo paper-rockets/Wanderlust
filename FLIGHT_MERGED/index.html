@@ -663,7 +663,7 @@ initMapUI();
     window.addEventListener('wheel', (e) => {
         if (window.editorState && window.editorState.isEditorMode) return;
         cameraZoomDist += Math.sign(e.deltaY) * 4.0;
-        cameraZoomDist = Math.max(0.5, Math.min(100.0, cameraZoomDist)); // clamp between 0.5 and 100 units
+        cameraZoomDist = Math.max(6.0, Math.min(100.0, cameraZoomDist)); // clamp between 6.0 and 100 units
 
     }, { passive: true });
     
@@ -713,7 +713,7 @@ initMapUI();
 
 
 
-    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 2.0, 30000); // Extended far plane so 20000-unit sun is visible
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 30000); // Extended far plane so 20000-unit sun is visible
     camera.position.set(0, 9, 26);
     const renderer = new THREE.WebGLRenderer({ antialias: !LOW_GFX, preserveDrawingBuffer: true, logarithmicDepthBuffer: false });
     renderer.setSize(window.innerWidth, window.innerHeight);
