@@ -322,6 +322,7 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         sceneFog: true,
         fogIntensity: 1.0,
         terrainSmoothing: 0.0,
+        terrainMaterial: localStorage.getItem('wl_terrainMaterial') || 'MeshStandardMaterial',
         waterMode: 'realistic',
         toggleRealistic: true,
         toggleAnime: false,
@@ -1228,6 +1229,10 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
 
     const debugFolder = gui.addFolder('Debug Render');
     debugFolder.add(params, 'showTerrain').name('Terrain').onChange(v => { terrain.visible = v; });
+    debugFolder.add(params, 'terrainMaterial', ['MeshStandardMaterial', 'MeshToonMaterial', 'MeshBasicMaterial']).name('Terrain Material').onChange(v => {
+        setTerrainMaterialMode(v);
+        localStorage.setItem('wl_terrainMaterial', v);
+    });
 
     // Water Master Toggle & Shader Toggles
     const showWaterController = debugFolder.add(params, 'showWater').name('Water Master Toggle').onChange(v => {
@@ -1874,135 +1879,146 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
         uShimmerMult: { value: 1.0 }
     };
 
-    const terrainMat = new THREE.MeshStandardMaterial({ 
+    const terrainMatStandard = new THREE.MeshStandardMaterial({ 
         vertexColors: true, 
         roughness: 0.85,
         metalness: 0.05,
         dithering: true
     });
-    
-    // Shader injection for Journey Sand Shaders (glitter sparkles, dune rim glow, warm shadows)
-    terrainMat.onBeforeCompile = (shader) => {
-        shader.uniforms.uTime = terrainUniforms.uTime;
-        shader.uniforms.uSunDir = terrainUniforms.uSunDir;
-        shader.uniforms.uSandNoiseMap = terrainUniforms.uSandNoiseMap;
-        shader.uniforms.uShimmerMult = terrainUniforms.uShimmerMult;
-        
-        shader.vertexShader = `
-            attribute float aBiomeType;
-            varying float vBiomeType;
-            varying vec3 vWorldPos;
-            varying vec3 vViewPos;
-        ` + shader.vertexShader;
-        
-        shader.vertexShader = shader.vertexShader.replace(
-            `#include <worldpos_vertex>`,
-            `#include <worldpos_vertex>
-             vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-             vViewPos = - (modelViewMatrix * vec4(transformed, 1.0)).xyz;
-             vBiomeType = aBiomeType;`
-        );
 
-        shader.fragmentShader = `
-            uniform float uTime;
-            uniform vec3 uSunDir;
-            uniform float uShimmerMult;
-            uniform sampler2D uSandNoiseMap;
-            varying float vBiomeType;
-            varying vec3 vWorldPos;
-            varying vec3 vViewPos;
+    const terrainMatToon = new THREE.MeshToonMaterial({ 
+        vertexColors: true, 
+        gradientMap: gradientMap,
+        dithering: true
+    });
 
-            float hash(vec2 p) {
-                return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123);
-            }
-            float noise(vec2 p) {
-                vec2 i = floor(p);
-                vec2 f = fract(p);
-                vec2 u = f*f*(3.0-2.0*f);
-                return mix(mix(hash(i + vec2(0.0,0.0)), hash(i + vec2(1.0,0.0)), u.x),
-                           mix(hash(i + vec2(0.0,1.0)), hash(i + vec2(1.0,1.0)), u.x), u.y);
-            }
-            float fbm(vec2 p) {
-                float f = 0.0;
-                f += 0.5000 * noise(p); p = p * 2.02;
-                f += 0.2500 * noise(p); p = p * 2.03;
-                f += 0.1250 * noise(p);
-                return f;
-            }
-        ` + shader.fragmentShader;
+    const terrainMatBasic = new THREE.MeshBasicMaterial({ 
+        vertexColors: true 
+    });
 
-
-
-        shader.fragmentShader = shader.fragmentShader.replace(
-            `#include <dithering_fragment>`,
-            `#include <dithering_fragment>
+    function setupTerrainShader(mat) {
+        mat.onBeforeCompile = (shader) => {
+            shader.uniforms.uTime = terrainUniforms.uTime;
+            shader.uniforms.uSunDir = terrainUniforms.uSunDir;
+            shader.uniforms.uSandNoiseMap = terrainUniforms.uSandNoiseMap;
+            shader.uniforms.uShimmerMult = terrainUniforms.uShimmerMult;
             
-            vec3 viewDir = normalize(vViewPos);
-            vec3 norm = normalize(vNormal);
-            vec3 lightDir = normalize(uSunDir);
-            vec3 halfDir = normalize(lightDir + viewDir);
-            float lightFacing = clamp(dot(norm, lightDir), 0.0, 1.0);
-            float nDotH = clamp(dot(norm, halfDir), 0.0, 1.0);
+            shader.vertexShader = `
+                attribute float aBiomeType;
+                varying float vBiomeType;
+                varying vec3 vWorldPos;
+                varying vec3 vViewPos;
+            ` + shader.vertexShader;
             
-            // 1. Detect Sand / Warm Dune Surface (explicit attribute)
-            float isSand = step(0.9, vBiomeType) * step(vBiomeType, 1.1);
-            
-            if (isSand > 0.1) {
-                // 1. Broad Radiant Fresnel Edge Glow (Sunlit dune crest rim lighting)
-                float rim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
-                float rimGlowStrength = pow(rim, 3.0) * (lightFacing * 0.75 + 0.25) * 0.65;
-                vec3 rimGlow = vec3(1.0, 0.82, 0.48) * rimGlowStrength;
+            shader.vertexShader = shader.vertexShader.replace(
+                `#include <worldpos_vertex>`,
+                `#include <worldpos_vertex>
+                 vWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+                 vViewPos = - (modelViewMatrix * vec4(transformed, 1.0)).xyz;
+                 vBiomeType = aBiomeType;`
+            );
 
-                // 2. High-Frequency Sparkling Diamond Sand Grains (Multi-scale Glitter)
-                vec2 gridUV1 = floor(vWorldPos.xz * 2.2 + viewDir.xz * 6.0);
-                vec2 gridUV2 = floor(vWorldPos.xz * 5.5 - viewDir.xz * 10.0);
-                float sparkle1 = hash(gridUV1);
-                float sparkle2 = hash(gridUV2 + vec2(7.13, 3.71));
-                float sparkle = pow(sparkle1 * sparkle2, 5.0) * 16.0;
+            shader.fragmentShader = `
+                uniform float uTime;
+                uniform vec3 uSunDir;
+                uniform float uShimmerMult;
+                uniform sampler2D uSandNoiseMap;
+                varying float vBiomeType;
+                varying vec3 vWorldPos;
+                varying vec3 vViewPos;
 
-                // Texture-assisted micro glints
-                vec2 sandUV1 = vWorldPos.xz * 0.15;
-                vec2 sandUV2 = vWorldPos.xz * 0.35;
-                float texNoise = texture2D(uSandNoiseMap, sandUV1).r * 0.6 + texture2D(uSandNoiseMap, sandUV2).g * 0.4;
-                float texSparkle = pow(texNoise, 2.2) * 2.5;
+                float hash(vec2 p) {
+                    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123);
+                }
+                float noise(vec2 p) {
+                    vec2 i = floor(p);
+                    vec2 f = fract(p);
+                    vec2 u = f*f*(3.0-2.0*f);
+                    return mix(mix(hash(i + vec2(0.0,0.0)), hash(i + vec2(1.0,0.0)), u.x),
+                               mix(hash(i + vec2(0.0,1.0)), hash(i + vec2(1.0,1.0)), u.x), u.y);
+                }
+                float fbm(vec2 p) {
+                    float f = 0.0;
+                    f += 0.5000 * noise(p); p = p * 2.02;
+                    f += 0.2500 * noise(p); p = p * 2.03;
+                    f += 0.1250 * noise(p);
+                    return f;
+                }
+            ` + shader.fragmentShader;
 
-                // 3. Blinn-Phong Specular Sheen
-                float specSheen = pow(nDotH, 16.0) * lightFacing * 1.2;
+            shader.fragmentShader = shader.fragmentShader.replace(
+                `#include <dithering_fragment>`,
+                `#include <dithering_fragment>
                 
-                // Combine glittering sparkle with specular sheen & grazing rim sparkle
-                float totalGlitter = (specSheen * (sparkle + 0.4) + sparkle * 0.5 + texSparkle * 0.3) * lightFacing;
-                vec3 specColor = totalGlitter * vec3(1.0, 0.88, 0.62) * uShimmerMult;
-
-                // Warm ambient terracotta backscatter in dune shadows
-                vec3 warmBackscatter = vec3(0.06, 0.02, 0.008) * (1.0 - lightFacing);
-
-                gl_FragColor.rgb += (rimGlow + specColor + warmBackscatter) * isSand;
-            }
-
-            // 2. Detect Snow / North Pole Glacial Surface (explicit attribute)
-            float isSnow = step(1.9, vBiomeType) * step(vBiomeType, 2.1);
-            
-            if (isSnow > 0.1) {
-                float snowRim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
-                float snowRimStrength = pow(snowRim, 4.0) * (lightFacing * 0.7 + 0.3) * 0.25;
-                vec3 snowRimGlow = vec3(0.65, 0.85, 1.0) * snowRimStrength;
+                vec3 viewDir = normalize(vViewPos);
+                vec3 norm = normalize(vNormal);
+                vec3 lightDir = normalize(uSunDir);
+                vec3 halfDir = normalize(lightDir + viewDir);
+                float lightFacing = clamp(dot(norm, lightDir), 0.0, 1.0);
+                float nDotH = clamp(dot(norm, halfDir), 0.0, 1.0);
                 
-                float mainSnowSpec = pow(nDotH, 20.0) * lightFacing * 0.7;
-
-                vec2 snowUV1 = vWorldPos.xz * 0.12 + uTime * 0.005;
-                vec2 snowUV2 = vWorldPos.xz * 0.28 - uTime * 0.007;
-                float snowGlitter = texture2D(uSandNoiseMap, snowUV1).r * 0.65 + texture2D(uSandNoiseMap, snowUV2).g * 0.55;
-                snowGlitter = pow(clamp(snowGlitter, 0.0, 1.0), 3.0);
-                mainSnowSpec *= snowGlitter;
-
-                float snowRimSpec = pow(snowRim, 3.0) * snowGlitter * lightFacing * 0.35;
-                vec3 snowSpecColor = (mainSnowSpec + snowRimSpec) * vec3(0.85, 0.95, 1.0) * uShimmerMult;
+                // 1. Detect Sand / Warm Dune Surface (explicit attribute)
+                float isSand = step(0.9, vBiomeType) * step(vBiomeType, 1.1);
                 
-                gl_FragColor.rgb += (snowRimGlow + snowSpecColor) * isSnow;
-            }
-            `
-        );
-    };
+                if (isSand > 0.1) {
+                    // 1. Broad Radiant Fresnel Edge Glow (Sunlit dune crest rim lighting)
+                    float rim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
+                    float rimGlowStrength = pow(rim, 3.0) * (lightFacing * 0.75 + 0.25) * 0.65;
+                    vec3 rimGlow = vec3(1.0, 0.82, 0.48) * rimGlowStrength;
+
+                    // 2. High-Frequency Sparkling Diamond Sand Grains (Multi-scale Glitter)
+                    vec2 gridUV1 = floor(vWorldPos.xz * 2.2 + viewDir.xz * 6.0);
+                    vec2 gridUV2 = floor(vWorldPos.xz * 5.5 - viewDir.xz * 10.0);
+                    float sparkle1 = hash(gridUV1);
+                    float sparkle2 = hash(gridUV2 + vec2(7.13, 3.71));
+                    float sparkle = pow(sparkle1 * sparkle2, 5.0) * 16.0;
+
+                    // Texture-assisted micro glints
+                    vec2 sandUV1 = vWorldPos.xz * 0.15;
+                    vec2 sandUV2 = vWorldPos.xz * 0.35;
+                    float texNoise = texture2D(uSandNoiseMap, sandUV1).r * 0.6 + texture2D(uSandNoiseMap, sandUV2).g * 0.4;
+                    float texSparkle = pow(texNoise, 2.2) * 2.5;
+
+                    // 3. Blinn-Phong Specular Sheen
+                    float specSheen = pow(nDotH, 16.0) * lightFacing * 1.2;
+                    
+                    // Combine glittering sparkle with specular sheen & grazing rim sparkle
+                    float totalGlitter = (specSheen * (sparkle + 0.4) + sparkle * 0.5 + texSparkle * 0.3) * lightFacing;
+                    vec3 specColor = totalGlitter * vec3(1.0, 0.88, 0.62) * uShimmerMult;
+
+                    // Warm ambient terracotta backscatter in dune shadows
+                    vec3 warmBackscatter = vec3(0.06, 0.02, 0.008) * (1.0 - lightFacing);
+
+                    gl_FragColor.rgb += (rimGlow + specColor + warmBackscatter) * isSand;
+                }
+
+                // 2. Detect Snow / North Pole Glacial Surface (explicit attribute)
+                float isSnow = step(1.9, vBiomeType) * step(vBiomeType, 2.1);
+                
+                if (isSnow > 0.1) {
+                    float snowRim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
+                    float snowRimStrength = pow(snowRim, 4.0) * (lightFacing * 0.7 + 0.3) * 0.25;
+                    vec3 snowRimGlow = vec3(0.65, 0.85, 1.0) * snowRimStrength;
+                    
+                    float mainSnowSpec = pow(nDotH, 20.0) * lightFacing * 0.7;
+
+                    vec2 snowUV1 = vWorldPos.xz * 0.12 + uTime * 0.005;
+                    vec2 snowUV2 = vWorldPos.xz * 0.28 - uTime * 0.007;
+                    float snowGlitter = texture2D(uSandNoiseMap, snowUV1).r * 0.65 + texture2D(uSandNoiseMap, snowUV2).g * 0.55;
+                    snowGlitter = pow(clamp(snowGlitter, 0.0, 1.0), 3.0);
+                    mainSnowSpec *= snowGlitter;
+
+                    float snowRimSpec = pow(snowRim, 3.0) * snowGlitter * lightFacing * 0.35;
+                    vec3 snowSpecColor = (mainSnowSpec + snowRimSpec) * vec3(0.85, 0.95, 1.0) * uShimmerMult;
+                    
+                    gl_FragColor.rgb += (snowRimGlow + snowSpecColor) * isSnow;
+                }
+                `
+            );
+        };
+    }
+    setupTerrainShader(terrainMatStandard);
+    setupTerrainShader(terrainMatToon);
 
     const treeUniforms = {
         uPlayerPos: { value: new THREE.Vector3(0, 0, 0) },
@@ -2047,9 +2063,22 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     // ==========================================
     let terrainGeo = new THREE.PlaneGeometry(4000, 4000, terrainRes, terrainRes); 
     terrainGeo.rotateX(-Math.PI / 2);
-    const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+    let initialTerrainMat = params.terrainMaterial === 'MeshToonMaterial' ? terrainMatToon : (params.terrainMaterial === 'MeshBasicMaterial' ? terrainMatBasic : terrainMatStandard);
+    const terrain = new THREE.Mesh(terrainGeo, initialTerrainMat);
     terrain.receiveShadow = true;
     scene.add(terrain);
+
+    function setTerrainMaterialMode(mode) {
+        params.terrainMaterial = mode;
+        if (mode === 'MeshToonMaterial') {
+            terrain.material = terrainMatToon;
+        } else if (mode === 'MeshBasicMaterial') {
+            terrain.material = terrainMatBasic;
+        } else {
+            terrain.material = terrainMatStandard;
+        }
+        terrain.material.needsUpdate = true;
+    }
 
     let lastTerrainGridX = -9999;
     let lastTerrainGridZ = -9999;

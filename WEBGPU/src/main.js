@@ -2978,6 +2978,7 @@ import { postProcessing as composer, initPostProcessing, bloomPass, godRaysPass,
             if (params.showTrees) {
                 const playerInJungle = getBiomeAt(focusX, focusZ).name.toLowerCase().includes('jungle');
                 let treeSpawnAttemptsThisFrame = 0;
+                const MAX_TREE_SPAWN_ATTEMPTS = 50;
                 // 1. Update standard pine trees (activePineModels)
                 if (activePineModels && activePineModels.length > 0) {
                     for (let mIdx = 0; mIdx < activePineModels.length; mIdx++) {
