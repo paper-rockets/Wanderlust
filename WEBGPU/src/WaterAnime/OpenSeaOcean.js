@@ -1,16 +1,30 @@
+/**
+ * OpenSeaOcean.js — Realtime WebGPU / TSL Gerstner Ocean Simulation
+ *
+ * Core Three.js TSL wave & FBM micro-surface shader adapted from:
+ * "Open Sea — Realtime Ocean" (Kimi AI Prototype)
+ * https://qdtipu6rd2myk.ok.kimi.link/?id=2077778000455245824&share_id=19f6b13b-b432-8eb2-8000-0000c67df4cd
+ *
+ * Enhanced for Wanderlust with:
+ * - Dynamic interactive GUI & modal editor controls
+ * - Dynamic object ripples & Kelvin V-wake shockwave physics
+ * - Realtime CPU wave height/normal buoyancy calculations for player & aircraft
+ * - Horizon concealment & biome lighting integration
+ */
+
 import * as THREE from 'three/webgpu';
 import {
   Fn, uniform, float, vec2, vec3, vec4,
   sin, cos, atan, abs, dot, cross, normalize, length, mix, pow, max, clamp,
   fract, floor, smoothstep, distance, reflect,
-  positionLocal, positionWorld, cameraPosition
+  positionLocal, positionWorld, cameraPosition, texture
 } from 'three/tsl';
 
 /* ============================================================
    Uniforms — Shared across ocean TSL nodes and GUI Editor
    ============================================================ */
 export const timeUniform = uniform(0.00001);
-export const seaUniform = uniform(0.4);
+export const seaUniform = uniform(0.45);
 export const speedUniform = uniform(1.0);
 export const detailAmountUniform = uniform(1.0);
 export const foamAmountUniform = uniform(1.0);
@@ -21,6 +35,9 @@ export const waveHeightUniform = uniform(1.0);
 export const oceanScaleUniform = uniform(1.0);
 export const swellWavelengthUniform = uniform(1.0);
 export const foamDecayUniform = uniform(1.0);
+export const qualityModeUniform = uniform(1.0); // 1.0 = High / Cinematic, 0.0 = Performance (High FPS)
+export const distanceLodUniform = uniform(1.0); // 1.0 = Distance LOD active, 0.0 = Off
+export const lodDistanceThresholdUniform = uniform(1800.0);
 
 export const sunDirUniform = uniform(new THREE.Vector3(0, 1, 0));
 export const sunColorUniform = uniform(new THREE.Color(1, 1, 1));
@@ -38,23 +55,89 @@ export const foamSpreadUniform = uniform(0.65);
 export const foamOpacityUniform = uniform(1.0);
 
 /* ============================================================
-   Gerstner Swell — 10 Multi-directional Spectral Components
+   Shoreline Depth Field — CPU-baked terrain height texture
+   (Phase 1 infrastructure. Populated by WaterAnime/TerrainDepthField.js
+    via WaterSystem; consumed by the shore shading in colorNode.)
+
+   Sampling contract for the shore shading pass:
+     const fieldUv = positionWorld.xz.sub(depthFieldOriginUniform).div(depthFieldSizeUniform);
+     const terrainH = terrainDepthTexNode.sample(fieldUv).r;
+     const depth    = waterLevelUniform.sub(terrainH);
+   `terrainDepthTexNode` is a stable node created at module load, so the
+   graph can never capture null. Its bound DataTexture is swapped in by
+   setTerrainDepthTexture() before createOpenSeaMaterial() runs.
+   Out of bounds the texture clamps to edge, so also mask on fieldUv
+   being inside 0..1 and on depthFieldValidUniform before applying shore FX.
+   Until the first bake completes every texel reads DEPTH_FIELD_SENTINEL
+   (-1000.0) => "very deep", so all shore effects fall away naturally.
+   ============================================================ */
+
+// Sentinel height written into unbaked texels. Anything at/below this is "no data".
+export const DEPTH_FIELD_SENTINEL = -1000.0;
+
+// 1x1 placeholder so the TSL graph always has a valid, correctly-formatted
+// texture bound. Must match the real field's format/type/filters/wrapping so
+// the generated WGSL is identical when the real texture is swapped in.
+const _depthFieldPlaceholder = new THREE.DataTexture(
+  new Float32Array([DEPTH_FIELD_SENTINEL]), 1, 1, THREE.RedFormat, THREE.FloatType
+);
+_depthFieldPlaceholder.minFilter = THREE.LinearFilter;
+_depthFieldPlaceholder.magFilter = THREE.LinearFilter;
+_depthFieldPlaceholder.wrapS = THREE.ClampToEdgeWrapping;
+_depthFieldPlaceholder.wrapT = THREE.ClampToEdgeWrapping;
+_depthFieldPlaceholder.generateMipmaps = false;
+_depthFieldPlaceholder.flipY = false;
+_depthFieldPlaceholder.unpackAlignment = 1;
+_depthFieldPlaceholder.needsUpdate = true;
+
+// Stable texture node. Never reassigned - only its bound texture value changes,
+// which THREE.NodeSampledTexture.update() picks up automatically each frame.
+export const terrainDepthTexNode = texture(_depthFieldPlaceholder);
+// Alias under the name used in WATER_SHORE_PLAN.md; same node object.
+export const terrainDepthTexUniform = terrainDepthTexNode;
+
+/**
+ * Binds the baked terrain-height DataTexture to the shared depth-field node.
+ * Call this BEFORE createOpenSeaMaterial() so the graph is built against the
+ * real texture (a later call still works - the binding is refreshed per frame).
+ * @param {THREE.DataTexture} tex
+ */
+export function setTerrainDepthTexture(tex) {
+  if (tex) terrainDepthTexNode.value = tex;
+}
+
+export const depthFieldOriginUniform  = uniform(new THREE.Vector2(0, 0));
+export const depthFieldSizeUniform    = uniform(4000.0);
+export const depthFieldValidUniform   = uniform(0.0);   // 0 until the first bake completes
+export const waterLevelUniform        = uniform(2.4);   // mirrors openSeaMesh.position.y
+
+export const sandColorUniform         = uniform(new THREE.Color(0.85, 0.80, 0.62));
+export const shoreShallowColorUniform = uniform(new THREE.Color(0.32, 0.72, 0.70));
+export const shoreDepthUniform        = uniform(6.0);
+export const shoreOpacityUniform      = uniform(0.10);
+export const shoreFoamWidthUniform    = uniform(2.2);
+export const shoreFoamSpeedUniform    = uniform(0.8);
+export const shoreFoamStrengthUniform = uniform(1.0);
+export const shoreRefractionUniform   = uniform(0.35);
+
+/* ============================================================
+   Gerstner Swell — 5 Multi-directional Spectral Components
    ============================================================ */
 export let WAVE_PARAMS = [
-  { dir: [1.0, 0.25], wavelength: 74.0, steepness: 0.11, phase: 0.0 },
-  { dir: [0.65, 0.75], wavelength: 43.0, steepness: 0.10, phase: 1.2 },
-  { dir: [-0.72, 0.68], wavelength: 27.5, steepness: 0.08, phase: 2.4 },
-  { dir: [0.35, -0.93], wavelength: 16.2, steepness: 0.07, phase: 0.5 },
-  { dir: [-0.42, -0.90], wavelength: 9.8, steepness: 0.05, phase: 3.1 },
-  { dir: [0.92, -0.38], wavelength: 6.4, steepness: 0.04, phase: 4.2 },
-  { dir: [-0.85, 0.52], wavelength: 4.1, steepness: 0.03, phase: 1.8 },
-  { dir: [0.15, 0.98], wavelength: 2.7, steepness: 0.02, phase: 5.0 },
-  { dir: [-0.55, -0.83], wavelength: 1.8, steepness: 0.015, phase: 0.9 },
-  { dir: [0.78, 0.62], wavelength: 1.1, steepness: 0.01, phase: 3.7 }
+  // Primary ocean swell - long wavelength (160m), high amplitude
+  { dir: [0.92, 0.38], wavelength: 160.0, steepness: 0.22, phase: 0.0 },
+  // Secondary cross-swell (88m)
+  { dir: [0.38, 0.92], wavelength: 88.0, steepness: 0.16, phase: 1.4 },
+  // Medium choppy wind wave (42m)
+  { dir: [-0.65, 0.76], wavelength: 42.0, steepness: 0.12, phase: 2.8 },
+  // High-frequency surface chop (20m)
+  { dir: [0.78, -0.62], wavelength: 20.0, steepness: 0.08, phase: 4.1 },
+  // Capillary detail wave (9.5m)
+  { dir: [-0.85, -0.52], wavelength: 9.5, steepness: 0.05, phase: 5.5 }
 ];
 
 export let WAVES = WAVE_PARAMS.map(({ dir, wavelength, steepness, phase }) => {
-  const len = Math.hypot(dir[0], dir[1]);
+  const len = Math.hypot(dir[0], dir[1]) || 1.0;
   const k = (2 * Math.PI) / wavelength;
   return {
     dx: uniform(dir[0] / len),
@@ -69,7 +152,7 @@ export let WAVES = WAVE_PARAMS.map(({ dir, wavelength, steepness, phase }) => {
 export function updateWaveUniforms(i) {
   const p = WAVE_PARAMS[i];
   const w = WAVES[i];
-  const len = Math.hypot(p.dir[0], p.dir[1]);
+  const len = Math.hypot(p.dir[0], p.dir[1]) || 1.0;
   const k = (2 * Math.PI) / p.wavelength;
   
   w.dx.value = p.dir[0] / len;
@@ -80,20 +163,50 @@ export function updateWaveUniforms(i) {
   w.phase.value = p.phase;
 }
 
+export function randomizeSeaSpectrum() {
+  for (let i = 0; i < WAVES.length; i++) {
+    const angle = (Math.random() * 0.9 - 0.45) + (i % 2 === 0 ? 0 : Math.PI * 0.62);
+    const wavelength = 160.0 * Math.pow(0.55, i) * (0.85 + Math.random() * 0.35);
+    const steepness = 0.22 * Math.pow(0.72, i) * (0.8 + Math.random() * 0.4);
+    
+    WAVE_PARAMS[i] = {
+      dir: [Math.cos(angle), Math.sin(angle)],
+      wavelength: Math.max(wavelength, 2.0),
+      steepness: Math.max(steepness, 0.01),
+      phase: Math.random() * Math.PI * 2
+    };
+    updateWaveUniforms(i);
+  }
+}
+
+export function setWindDirection(angleDeg, spreadPercent = 45) {
+  const mainAngleRad = (angleDeg * Math.PI) / 180;
+  const spreadFactor = spreadPercent / 100.0;
+  WAVES.forEach((w, i) => {
+    const spreadOffset = ((i % 2 === 0 ? 1 : -1) * (i * 0.25)) * spreadFactor;
+    const finalAngle = mainAngleRad + spreadOffset;
+    WAVE_PARAMS[i].dir[0] = Math.cos(finalAngle);
+    WAVE_PARAMS[i].dir[1] = Math.sin(finalAngle);
+    w.dx.value = Math.cos(finalAngle);
+    w.dz.value = Math.sin(finalAngle);
+  });
+}
+
 // phase: f = k * (dot(direction, xz) - time * c) + phase
 const wavePhase = (w, xz, time) =>
   w.k.mul(dot(vec2(w.dx, w.dz), xz).sub(time.mul(w.c))).add(w.phase);
 
-// displaced surface point for a given parametric xz
-const wavePosition = Fn(([rawXz, time, sea]) => {
-  const xz = rawXz.mul(oceanScaleUniform).toVar();
-  const p = vec3(xz.x, 0.0, xz.y).toVar();
+// displaced surface point for a given parametric xz (sampled in world space for true physical waves)
+const wavePosition = Fn(([localXz, time, sea]) => {
+  const worldXz = localXz.add(cameraPosition.xz);
+  const xz = worldXz.mul(oceanScaleUniform).toVar();
+  const p = vec3(localXz.x, float(0.0), localXz.y).toVar();
   for (const w of WAVES) {
-    const a = w.steepness.mul(sea).div(w.k).mul(swellWavelengthUniform);
+    const a = w.steepness.mul(sea).div(w.k).mul(swellWavelengthUniform).mul(waveHeightUniform);
     const f = wavePhase(w, xz, time);
-    p.x.addAssign(a.mul(w.dx).mul(cos(f)));
-    p.y.addAssign(a.mul(sin(f)).mul(waveHeightUniform));
-    p.z.addAssign(a.mul(w.dz).mul(cos(f)));
+    p.x.addAssign(a.mul(w.dx).mul(cos(f)).mul(0.35));
+    p.y.addAssign(a.mul(sin(f)));
+    p.z.addAssign(a.mul(w.dz).mul(cos(f)).mul(0.35));
   }
   return p;
 });
@@ -141,8 +254,8 @@ const waveCrest = Fn(([rawXz, time, sea]) => {
   const xz = rawXz.mul(oceanScaleUniform).toVar();
   const h = float(0.0).toVar();
   for (const w of WAVES) {
-    const a = w.steepness.mul(sea).div(w.k).mul(swellWavelengthUniform);
-    h.addAssign(a.mul(sin(wavePhase(w, xz, time))).mul(waveHeightUniform));
+    const a = w.steepness.mul(sea).div(w.k).mul(swellWavelengthUniform).mul(waveHeightUniform);
+    h.addAssign(a.mul(sin(wavePhase(w, xz, time))));
   }
   return h;
 });
@@ -191,8 +304,8 @@ const skyColor = Fn(([rawDir]) => {
   sky.assign(mix(sky, hazeColor, smoothstep(-0.15, 0.0, dir.y).oneMinus()));
 
   const s = max(dot(dir, sunDirUniform), 0.0);
-  sky.addAssign(sunColorUniform.mul(pow(s, 10.0)).mul(0.18));                 
-  sky.addAssign(sunColorUniform.mul(smoothstep(0.9994, 0.9998, s)).mul(30.0)); 
+  sky.addAssign(sunColorUniform.mul(pow(s, 22.0)).mul(0.2));                 
+  sky.addAssign(sunColorUniform.mul(smoothstep(0.9994, 0.9998, s)).mul(20.0)); 
 
   return sky;
 });
@@ -203,22 +316,21 @@ const skyColor = Fn(([rawDir]) => {
 export const createOpenSeaMaterial = () => {
   const oceanMaterial = new THREE.MeshBasicNodeMaterial();
   oceanMaterial.transparent = true;
+  oceanMaterial.side = THREE.DoubleSide;
 
   const scaledTime = timeUniform.mul(speedUniform);
   const gerstnerP = wavePosition(positionLocal.xz, scaledTime, seaUniform);
-  const objRippleY = objectRippleDisplacement(
-    positionLocal.xz,
-    scaledTime,
-    objPosUniform,
-    objRadiusUniform,
-    objActiveUniform,
-    objRippleStrengthUniform
-  );
-  oceanMaterial.positionNode = vec3(gerstnerP.x, gerstnerP.y.add(objRippleY), gerstnerP.z);
+  oceanMaterial.positionNode = vec3(gerstnerP.x, gerstnerP.y, gerstnerP.z);
 
   oceanMaterial.colorNode = Fn(() => {
     const P = positionWorld.toVar();
     const xz = P.xz;
+    const camDist = distance(cameraPosition, P).toVar();
+
+    // Distance LOD factor: 1.0 up close (<250m), smoothly scales down towards distance
+    const distLod = smoothstep(lodDistanceThresholdUniform, float(250.0), camDist);
+    const effectiveLodFactor = mix(float(1.0), distLod, distanceLodUniform);
+    const effectiveQuality = mix(float(0.55), float(1.0), qualityModeUniform);
 
     const n0 = waveNormal(xz, scaledTime, seaUniform);
     const crest = waveCrest(xz, scaledTime, seaUniform).toVar();
@@ -231,13 +343,20 @@ export const createOpenSeaMaterial = () => {
     const nonUniformChop = mix(float(0.35), float(1.65), chopMask.mul(chopPatchinessUniform));
     const crestChopMult = mix(float(0.55), float(1.45), smoothstep(-0.4, 1.1, crest));
 
-    const detail = vec3(h0.sub(hx), 0.0, h0.sub(hz))
-      .mul(float(1.5).mul(seaUniform.mul(0.6).add(0.4)).mul(detailAmountUniform).mul(nonUniformChop).mul(crestChopMult));
+    const effectiveDetail = float(1.5)
+      .mul(seaUniform.mul(0.6).add(0.4))
+      .mul(detailAmountUniform)
+      .mul(effectiveLodFactor)
+      .mul(effectiveQuality)
+      .mul(nonUniformChop)
+      .mul(crestChopMult);
+
+    const detail = vec3(h0.sub(hx), 0.0, h0.sub(hz)).mul(effectiveDetail);
     const N = normalize(n0.add(detail)).toVar();
 
     const V = normalize(cameraPosition.sub(P)).toVar();
 
-    const colorTurbulence = fbm(xz.mul(0.035).add(vec2(scaledTime.mul(0.015), scaledTime.mul(-0.01)))).mul(0.28);
+    const colorTurbulence = fbm(xz.mul(0.035).add(vec2(scaledTime.mul(0.015), scaledTime.mul(-0.01)))).mul(0.28).mul(effectiveLodFactor);
     const body = mix(
       deepColorUniform,
       shallowColorUniform,
@@ -260,25 +379,16 @@ export const createOpenSeaMaterial = () => {
       .mul(0.5).add(0.5);
     const glitter = pow(max(dot(N, H), 0.0), 500.0).mul(mix(0.4, 3.4, glitterNoise));
     const sheen = pow(max(dot(N, H), 0.0), 48.0).mul(0.12);
-    color.addAssign(sunColorUniform.mul(glitter.add(sheen)));
+    color.addAssign(sunColorUniform.mul(glitter.add(sheen)).mul(effectiveLodFactor.mul(0.6).add(0.4)));
 
     const foamNoise = fbm(xz.mul(1.1).add(vec2(scaledTime.mul(0.22), scaledTime.mul(0.14))))
       .mul(0.5).add(0.5);
     const foam = smoothstep(0.5, 0.95, foamNoise).mul(smoothstep(1.0, 2.0, crest)).mul(foamAmountUniform).mul(foamEnabledUniform).mul(foamDecayUniform);
 
-    const distToObj = distance(P.xz, objPosUniform.xz);
-    const foamDist = distToObj.sub(objRadiusUniform);
-    const contactRing = smoothstep(foamSpreadUniform, float(0.0), foamDist.abs());
-    const ringNoise1 = fbm(P.xz.mul(3.8).add(vec2(scaledTime.mul(0.4), scaledTime.mul(0.25)))).mul(0.5).add(0.5);
-    const ringNoise2 = fbm(P.xz.mul(9.2).add(vec2(scaledTime.mul(-0.6), scaledTime.mul(0.55)))).mul(0.5).add(0.5);
-    const organicFoamMask = smoothstep(0.25, 0.75, ringNoise1.mul(ringNoise2).mul(1.6));
-    const objectFoam = contactRing.mul(organicFoamMask).mul(0.75).mul(foamOpacityUniform).mul(objActiveUniform).mul(foamEnabledUniform).mul(foamDecayUniform);
+    color.assign(mix(color, vec3(0.92, 0.96, 1.0), clamp(foam.mul(0.85), 0.0, 1.0)));
 
-    color.assign(mix(color, vec3(0.92, 0.96, 1.0), clamp(foam.add(objectFoam).mul(0.85), 0.0, 1.0)));
-
-    // Atmospheric horizon concealment
-    const camDist = distance(cameraPosition, P);
-    color.assign(mix(color, horizonColorUniform, smoothstep(2500.0, 7500.0, camDist)));
+    // Atmospheric horizon concealment — pushed to far distance to preserve vibrant mid-range ocean
+    color.assign(mix(color, horizonColorUniform, smoothstep(8000.0, 15500.0, camDist)));
 
     return vec4(color, waterOpacityUniform);
   })();

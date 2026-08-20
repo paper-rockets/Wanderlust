@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { PostProcessing } from 'three/webgpu';
-import { pass, vec2, vec3, vec4, mix, smoothstep, max, clamp, dot, float, uv, uniform, Loop, length, Fn, screenCoordinate, fract, sin, toneMapping } from 'three/tsl';
+import { pass, vec2, vec3, vec4, mix, smoothstep, max, clamp, dot, float, uv, uniform, Loop, length, min, Fn, screenCoordinate, fract, sin, toneMapping } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { LOW_GFX } from '../config/constants.js';
 import { renderer, scene, camera } from './Engine.js';
@@ -10,33 +10,47 @@ export let postProcessing;
 export let scenePass;
 let bloomNode = null;
 
-export const uBloomStrength = uniform(0.35);
+export const uBloomStrength = uniform(0.8);
 export const uBloomRadius = uniform(0.4);
-export const uBloomThreshold = uniform(0.85);
-export let isBloomOn = !LOW_GFX;
+export const uBloomThreshold = uniform(1.5);
+export let isBloomOn = false;  // MUST match main.js isBloomOn; bloom-on blew out the sun
 
 export function initPostProcessing() {
     postProcessing = new PostProcessing(renderer);
+    // MATCH flight-merged (WebGL): its EffectComposer chain ends in a raw ShaderPass with no
+    // <tonemapping_fragment> / <colorspace_fragment>, so the scene's linear HDR values land on
+    // the canvas untransformed. Letting WebGPU apply ACES + sRGB here is what washed the sky
+    // from a rich #4280c8 out to a near-white #d7e7f0.
+    postProcessing.outputColorTransform = false;
     scenePass = pass(scene, camera);
     const sceneColor = scenePass.getTextureNode('output');
     bloomNode = bloom(sceneColor, uBloomStrength, uBloomRadius, uBloomThreshold);
     updatePostProcessingPipeline();
 }
 
-// -- Volumetric God Rays Settings (100% matched to flight-merged) --
+// -- Volumetric God Rays Settings (matched to flight-merged) --
+// Note: flight-merged's ShaderPass samples the *bloomed* previous pass; a TSL Fn can only sample a
+// texture, so this samples the raw scene pass. Rays are therefore marginally crisper than WebGL's.
 export const uSunScreenPos = uniform(vec2(0.5, 0.5));
-export const uIntensity = uniform(1.8);
-export const uDecay = uniform(0.92);
+export const uIntensity = uniform(0.85);
+export const uDecay = uniform(0.927);
 export const uDensity = uniform(0.50);
-export const uWeight = uniform(0.85);
+export const uWeight = uniform(0.75);
+export const uLumMin = uniform(0.45);
+export const uLumMax = uniform(0.97);
+export const uDitherStrength = uniform(1.0);
+export const uEdgeFadeDist = uniform(1.5);
 export const uSunVisible = uniform(1.0);
-export const uRayColor = uniform(new THREE.Color(0xffd580));
+export const uRayColorInner = uniform(new THREE.Color(1.0, 0.9, 0.7));
+export const uRayColorOuter = uniform(new THREE.Color(1.0, 0.9, 0.7)); // == inner: flight-merged uses one flat ray colour
+export const uHaloRadius = uniform(0.2);
+export const uHaloStrength = uniform(0.0);  // flight-merged has NO halo term; 0.25 here lifted every
+                                            // sample near the sun over the 0.45 luminance gate and
+                                            // blew a solid white ellipse across the middle of the screen
 export let isGodRaysEnabled = !LOW_GFX;
 
-// Interleaved Gradient Noise (IGN) - clean low-discrepancy sampling, zero noise dust
-const ignDither = (p) => {
-    const magic = vec3(0.06711056, 0.00583715, 52.9829189);
-    return fract(magic.z.mul(fract(dot(p, magic.xy))));
+const pseudoRand = (p) => {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))).mul(43758.5453123));
 };
 
 const buildGodRaysNode = Fn(([baseTex]) => {
@@ -44,30 +58,30 @@ const buildGodRaysNode = Fn(([baseTex]) => {
 
     const deltaUV = vUv.sub(uSunScreenPos).toVar();
     const dist = length(deltaUV);
-    deltaUV.mulAssign(float(1.0 / 16.0).mul(uDensity));
+    deltaUV.mulAssign(float(1.0 / 32.0).mul(uDensity));
 
-    const dither = ignDither(screenCoordinate.xy);
+    const dither = pseudoRand(screenCoordinate.xy).mul(uDitherStrength);
     const sampleUV = vUv.sub(deltaUV.mul(dither)).toVar();
 
     const illumination = float(0.0).toVar();
     const currentWeight = float(uWeight).toVar();
 
-    Loop({ start: 0, end: 16 }, () => {
+    Loop({ start: 0, end: 32 }, () => {
         sampleUV.subAssign(deltaUV);
-        const clampedUV = clamp(sampleUV, vec2(0.001), vec2(0.999));
-
-        const samp = scenePass.getTextureNode().sample(clampedUV);
+        const samp = scenePass.getTextureNode().sample(clamp(sampleUV, vec2(0.001), vec2(0.999)));
         const lum = dot(samp.rgb, vec3(0.299, 0.587, 0.114));
-        const distFromSun = length(sampleUV.sub(uSunScreenPos));
-        const sunMask = float(1.0).sub(smoothstep(float(0.02), float(0.18), distFromSun));
-        const bright = smoothstep(float(0.70), float(0.98), lum).mul(sunMask);
+
+        const sampleDistToSun = length(sampleUV.sub(uSunScreenPos));
+        const halo = smoothstep(uHaloRadius, float(0.0), sampleDistToSun).mul(uHaloStrength);
+        const bright = smoothstep(uLumMin, uLumMax, lum.add(halo));
 
         illumination.addAssign(bright.mul(currentWeight));
         currentWeight.mulAssign(uDecay);
     });
 
-    const edgeFade = float(1.0).sub(smoothstep(float(0.35), float(1.6), dist));
-    const rayColor = uRayColor.mul(illumination).mul(uIntensity).mul(edgeFade).mul(uSunVisible);
+    const edgeFade = float(1.0).sub(smoothstep(float(0.4), uEdgeFadeDist, dist));
+    const rayTint = mix(uRayColorInner, uRayColorOuter, smoothstep(0.0, uEdgeFadeDist.mul(0.7), dist));
+    const rayColor = rayTint.mul(illumination).mul(uIntensity).mul(edgeFade).mul(uSunVisible);
 
     return vec4(baseTex.rgb.add(rayColor), baseTex.a);
 });
@@ -80,23 +94,40 @@ const getLuminance = (col) => dot(col, vec3(0.299, 0.587, 0.114));
 const buildGhibliSummerNode = Fn(([baseTex]) => {
     const col = baseTex.rgb;
     const lum = getLuminance(col);
-    
+
     const warmGold = col.mul(vec3(1.07, 1.02, 0.92));
     const azureShadow = col.mul(vec3(0.93, 0.98, 1.07));
     let finalCol = mix(azureShadow, warmGold, smoothstep(0.2, 0.75, lum));
-    
+
     finalCol = mix(vec3(lum), finalCol, 1.18);
     finalCol = finalCol.add(max(vec3(0.0), finalCol.sub(0.55)).mul(vec3(0.12, 0.09, 0.02)));
-    
+
     const vUv = uv();
     const centeredUv = vUv.sub(0.5).mul(2.0);
     const vign = clamp(float(1.0).sub(dot(centeredUv, centeredUv).mul(0.14)), 0.0, 1.0);
     finalCol = finalCol.mul(vign);
-    
+
     return vec4(finalCol, baseTex.a);
 });
 
-export const uToneExposure = uniform(1.2);
+export const uToneExposure = uniform(1.8);
+
+// -- Soft highlight rolloff --
+// With outputColorTransform = false there is NO tonemapping, so any channel above 1.0 hard-clips
+// to pure white. That is what turned the procedural sky dome horizon into a full-width white band.
+// Full ACES fixes the clipping but desaturates the sky (the original washout problem), so instead
+// this leaves everything below the knee completely untouched -- preserving the rich orange -- and
+// only Reinhard-rolls the excess above it.
+export const uRolloffKnee = uniform(0.75);
+const buildSoftClipNode = Fn(([baseTex]) => {
+    const col = baseTex.rgb;
+    const knee = uRolloffKnee;
+    const range = float(1.0).sub(knee);           // headroom left above the knee
+    const over = max(col.sub(knee), vec3(0.0));   // how far each channel overshoots
+    // Reinhard scaled into that headroom so the result asymptotes to exactly 1.0 and never clips.
+    const rolled = over.mul(range).div(over.add(range));
+    return vec4(min(col, vec3(knee)).add(rolled), baseTex.a);
+});
 
 // Main post processing graph setup
 export function updatePostProcessingPipeline() {
@@ -114,14 +145,17 @@ export function updatePostProcessingPipeline() {
     if (isGodRaysEnabled) {
         outputNode = buildGodRaysNode(outputNode);
     }
-    
+
     if (isSummerFilterOn) {
         outputNode = buildGhibliSummerNode(outputNode);
     }
-    
+
     if (typeof uWarpIntensity !== 'undefined' && uWarpIntensity.value > 0) {
         outputNode = buildPortalWarpNode(outputNode);
     }
+
+    // Always last: everything above has been additive and can exceed 1.0.
+    outputNode = buildSoftClipNode(outputNode);
 
     postProcessing.outputNode = outputNode;
     postProcessing.needsUpdate = true;
@@ -157,7 +191,7 @@ export const bloomPass = {
     }
 };
 
-export const godRaysPass = { 
+export const godRaysPass = {
     enabled: !LOW_GFX,
     uniforms: {
         uSunScreenPos: uSunScreenPos,
@@ -165,8 +199,15 @@ export const godRaysPass = {
         uDecay: uDecay,
         uDensity: uDensity,
         uWeight: uWeight,
+        uLumMin: uLumMin,
+        uLumMax: uLumMax,
+        uDitherStrength: uDitherStrength,
+        uEdgeFadeDist: uEdgeFadeDist,
         uSunVisible: uSunVisible,
-        uRayColor: uRayColor
+        uRayColorInner: uRayColorInner,
+        uRayColorOuter: uRayColorOuter,
+        uHaloRadius: uHaloRadius,
+        uHaloStrength: uHaloStrength
     }
 };
 

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 const _flyFwd = new THREE.Vector3();
 const _flyRight = new THREE.Vector3();

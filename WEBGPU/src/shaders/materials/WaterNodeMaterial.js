@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 import {
     Fn, vec2, vec3, vec4, float, step, dot, mix, clamp, pow,
-    positionWorld, color, length, cameraPosition, abs, floor, fract, max, smoothstep
+    positionWorld, color, length, cameraPosition, abs, floor, fract, max, smoothstep, uniform
 } from 'three/tsl';
 
 const mod289_3 = Fn(([x]) => {
@@ -58,15 +58,17 @@ export const snoise2D = Fn(([v]) => {
     return float(130.0).mul(dot(m, g));
 });
 
-export const createWaterNodeMaterial = (uTime) => {
+export const createWaterNodeMaterial = (uTime, uSkyHorizon, uWaterColor) => {
     const waterMat = new MeshStandardNodeMaterial({
-        color: new THREE.Color(0x4da9e8),
         roughness: 0.15,
         metalness: 0.15
     });
 
+    const horizonTarget = uSkyHorizon || uniform(new THREE.Color(0x8cbce6));
+    const waterColorNode = uWaterColor || uniform(new THREE.Color(0x4da9e8));
+
     waterMat.colorNode = Fn(() => {
-        const baseColor = color(new THREE.Color(0x4da9e8)).toVar();
+        const baseColor = color(waterColorNode).toVar();
 
         // High-fidelity continuous anime caustics
         const uv = positionWorld.xz.mul(0.08);
@@ -78,15 +80,15 @@ export const createWaterNodeMaterial = (uTime) => {
         const foamColor = vec3(0.92, 0.97, 1.0);
         baseColor.rgb.assign(mix(baseColor.rgb, foamColor, caustics.mul(0.42)));
 
-        // Gentle smooth atmospheric horizon blend
+        // Seamless atmospheric horizon concealment (blends 100% into dynamic sky horizon color)
         const dist = length(positionWorld.xz.sub(cameraPosition.xz));
-        const horizonFade = smoothstep(float(3000.0), float(12000.0), dist);
-        const horizonWaterColor = vec3(0.22, 0.55, 0.82);
-        baseColor.rgb.assign(mix(baseColor.rgb, horizonWaterColor, horizonFade.mul(0.4)));
+        const horizonFade = smoothstep(float(1200.0), float(5000.0), dist);
+        baseColor.rgb.assign(mix(baseColor.rgb, horizonTarget, horizonFade));
 
         return baseColor;
     })();
 
     return waterMat;
 };
+
 

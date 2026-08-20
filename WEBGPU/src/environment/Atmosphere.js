@@ -3,8 +3,8 @@
 import * as THREE from 'three';
 
 export const ENV_CONFIGS = [
-    { bg: 0x8cbce6, fog: 0x8cbce6, amb: 0xdcf2ff, dir: 0xfffaeb, ambI: 0.9, dirI: 2.5, starOp: 0, sunY: 2500, moonY: -1500 }, // Day
-    { bg: 0xff5a18, fog: 0xd45012, amb: 0xff8833, dir: 0xff6600, ambI: 1.2, dirI: 3.5, starOp: 0, sunY: 600, moonY: 200 },   // Dusk
+    { bg: 0x8cbce6, fog: 0x8cbce6, amb: 0xdcf2ff, dir: 0xfffaeb, ambI: 0.9, dirI: 2.5, starOp: 0, sunY: 1500, moonY: -1500 }, // Day
+    { bg: 0xffa07a, fog: 0xffa07a, amb: 0xffdab9, dir: 0xffaa00, ambI: 1.1, dirI: 3.2, starOp: 0, sunY: 160, moonY: 200 },   // Dusk
     { bg: 0x162d5a, fog: 0x224888, amb: 0x7788bb, dir: 0xffbb55, ambI: 1.5, dirI: 3.5, starOp: 1.0, sunY: -8000, moonY: 1600 } // Night
 ];
 
@@ -15,7 +15,7 @@ export class AtmosphereManager {
         this.timePhase = 0; // 0: Day, 1: Dusk, 2: Night
 
         this.scene.background = new THREE.Color(ENV_CONFIGS[0].bg);
-        this.scene.fog = new THREE.Fog(ENV_CONFIGS[0].fog, 1500, 2600);
+        this.scene.fog = new THREE.FogExp2(ENV_CONFIGS[0].fog, 0.00035);
 
         // Starfield
         const starGeo = new THREE.BufferGeometry();

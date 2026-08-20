@@ -76,6 +76,55 @@
     .dg { zoom: 1.2 !important; }
     .dg.ac { zoom: 1.2 !important; }
   </style>
+
+  <style>
+    /* modern top bar */
+    #top-bar {
+      position: fixed;
+      top: 18px;
+      right: 20px;
+      left: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 22px;
+      z-index: 100;
+      pointer-events: none;
+      background: transparent;
+      padding: 0;
+      border: none;
+    }
+    #top-bar > * { pointer-events: auto; }
+    #fps-counter {
+      color: rgba(255, 255, 255, 0.95);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      font-size: 16px;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 0 8px rgba(0, 0, 0, 0.2);
+      user-select: none;
+      pointer-events: none;
+      line-height: 1;
+    }
+    #top-bar button {
+      background: none;
+      border: none;
+      color: rgba(255, 255, 255, 0.95);
+      cursor: pointer;
+      font-size: 19px;
+      padding: 4px;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 0 8px rgba(0, 0, 0, 0.2);
+      transition: transform 0.15s ease, opacity 0.15s ease;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      outline: none;
+    }
+    #top-bar button:active { transform: scale(0.88); opacity: 0.7; }
+  </style>
 </head>
 <body>
 <div id="debug-overlay" style="position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 9999; background: #b91c1c; color: #ffffff; padding: 16px 24px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 90%; display: none;"></div>
@@ -107,15 +156,13 @@ window.addEventListener("unhandledrejection", function(event) {
   <div id="app"></div>
 
   
-  <div id="top-bar" style="position: fixed; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; z-index: 10; background: rgba(0,0,0,0.5); padding: 6px 12px; border-radius: 6px;">
-    <button id="pause-toggle" style="background: none; border: none; color: white; cursor: pointer; font-size: 13px; font-weight: bold; padding: 0;" title="Pause Flight">PAUSE</button>
-    <div id="fps-counter" style="color: #fff; font-family: monospace; font-size: 13px; font-weight: bold; pointer-events: none;">0 FPS</div>
-    <div id="time-label" style="color: #aaddff; font-family: monospace; font-size: 13px; font-weight: bold; pointer-events: none;">Morning</div>
-    <div id="biome-label" style="color: #ffe066; font-family: monospace; font-size: 13px; font-weight: bold; pointer-events: none; opacity: 0.9;"></div>
-    <button id="time-toggle" style="background: none; border: none; color: white; cursor: pointer; font-size: 13px; font-weight: bold; padding: 0;" title="Toggle Time">TIME</button>
-    <button id="char-toggle" style="background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.38); color: #fff; cursor: pointer; font-size: 12px; font-weight: bold; padding: 3px 8px; border-radius: 4px;" title="Switch Flight Model">MODEL: KIKI</button>
-    <button id="god-mode-btn" style="background: #ffaa00; border: none; color: #000; cursor: pointer; font-size: 12px; font-weight: bold; padding: 3px 8px; border-radius: 4px; margin-left: 6px; text-transform: uppercase;">God Mode</button>
-    <button id="gui-toggle-btn" style="background: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.5); color: white; cursor: pointer; font-size: 12px; font-weight: bold; padding: 3px 8px; border-radius: 4px;">Settings (H)</button>
+  <div id="top-bar">
+    <div id="fps-counter">FPS 61</div>
+    <button id="pause-toggle" title="Pause / Resume Flight">⏸</button>
+    <button id="god-mode-btn" title="Toggle God Mode (Free Camera) [G]">▲</button>
+    <button id="time-toggle" title="Cycle Time of Day">☀️</button>
+    <button id="fullscreen-toggle" title="Toggle Fullscreen">⛶</button>
+    <button id="gui-toggle-btn" title="Settings & Editor Panel">⚙</button>
   </div>
 
   <!-- World Map Overlay -->
@@ -136,6 +183,9 @@ window.addEventListener("unhandledrejection", function(event) {
   
 
   <div id="hidden-ui" style="display: none;">
+      <div id="time-label"></div>
+      <div id="biome-label"></div>
+      <button id="char-toggle">MODEL: KIKI</button>
       <button id="editor-toggle">Terrain Editor</button>
       <button id="crystal-edit-toggle">Edit Crystals</button>
       <button id="invis-toggle">Model: VISIBLE</button>
@@ -211,5 +261,9 @@ window.addEventListener("unhandledrejection", function(event) {
   }
   </script>
   <script type="module" src="./src/main.js"></script>
+<div id="folder-info" style="position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; z-index: 999999; pointer-events: none;">
+  Path: E:\Z FUCK CLAUDE | Name: Z FUCK CLAUDE
+</div>
 </body>
 </html>
+

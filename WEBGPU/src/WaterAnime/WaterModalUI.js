@@ -14,11 +14,32 @@ import {
   horizonColorUniform,
   zenithColorUniform,
   sunColorUniform,
+  sandColorUniform,
+  shoreShallowColorUniform,
+  shoreDepthUniform,
+  shoreOpacityUniform,
+  shoreFoamWidthUniform,
+  shoreFoamSpeedUniform,
+  shoreFoamStrengthUniform,
+  shoreRefractionUniform,
   WAVE_PARAMS,
   updateWaveUniforms,
   randomizeSeaSpectrum,
   setWindDirection
 } from './OpenSeaOcean.js';
+
+// Shore defaults — mirrors the uniform defaults declared in OpenSeaOcean.js.
+// Colors are the sRGB hex equivalents of Color(0.85, 0.80, 0.62) / Color(0.32, 0.72, 0.70).
+const SHORE_DEFAULTS = {
+    sand: '#ede7ce',
+    shoreShallow: '#99ddda',
+    shoreDepth: 6.0,
+    shoreOpacity: 0.10,
+    shoreFoamWidth: 2.2,
+    shoreFoamSpeed: 0.8,
+    shoreFoamStrength: 1.0,
+    shoreRefraction: 0.35
+};
 
 export class WaterModalUI {
     constructor(waterSystem) {
@@ -367,6 +388,7 @@ export class WaterModalUI {
                     <div class="oc-tab-bar">
                         <button class="oc-tab-btn active" data-tab="waves">Waves</button>
                         <button class="oc-tab-btn" data-tab="spectrum">Spectrum</button>
+                        <button class="oc-tab-btn" data-tab="shore">Shore</button>
                         <button class="oc-tab-btn" data-tab="atmosphere">Atmosphere</button>
                         <button class="oc-tab-btn" data-tab="view">View</button>
                         <button class="oc-tab-btn" data-tab="debug">Debug</button>
@@ -408,10 +430,10 @@ export class WaterModalUI {
 
                         <div class="oc-control">
                             <div class="oc-control-head">
-                                <label for="oc-oceanScale">Ocean Tile Scale</label>
+                                <label for="oc-oceanScale">Ocean Scale / Wave Scale</label>
                                 <span class="oc-value" id="oc-oceanScaleVal">100%</span>
                             </div>
-                            <input class="oc-slider" type="range" id="oc-oceanScale" min="50" max="300" value="100"/>
+                            <input class="oc-slider" type="range" id="oc-oceanScale" min="10" max="400" value="100"/>
                         </div>
 
                         <div class="oc-control">
@@ -559,7 +581,76 @@ export class WaterModalUI {
                         </div>
                     </div>
 
-                    <!-- Tab 3: Atmosphere & Colors -->
+                    <!-- Tab 3: Shore -->
+                    <div class="oc-tab-content" id="oc-tab-shore">
+                        <p class="oc-subtitle" style="margin-bottom: 14px; white-space: normal;">Shallow-water shading where the ocean meets the beach.</p>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label>Shore Colors</label>
+                            </div>
+                            <div class="oc-color-grid">
+                                <div class="oc-color-item">
+                                    <span>Sand Band</span>
+                                    <input type="color" id="oc-col-sand" value="#ede7ce"/>
+                                </div>
+                                <div class="oc-color-item">
+                                    <span>Shore Shallow</span>
+                                    <input type="color" id="oc-col-shoreShallow" value="#99ddda"/>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label for="oc-shoreDepth">Shore Depth</label>
+                                <span class="oc-value" id="oc-shoreDepthVal">6.0m</span>
+                            </div>
+                            <input class="oc-slider" type="range" id="oc-shoreDepth" min="0.5" max="30" value="6" step="0.1"/>
+                        </div>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label for="oc-shoreOpacity">Shore Opacity</label>
+                                <span class="oc-value" id="oc-shoreOpacityVal">10%</span>
+                            </div>
+                            <input class="oc-slider" type="range" id="oc-shoreOpacity" min="0" max="100" value="10"/>
+                        </div>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label for="oc-shoreFoamWidth">Shore Foam Width</label>
+                                <span class="oc-value" id="oc-shoreFoamWidthVal">2.2m</span>
+                            </div>
+                            <input class="oc-slider" type="range" id="oc-shoreFoamWidth" min="0" max="12" value="2.2" step="0.1"/>
+                        </div>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label for="oc-shoreFoamSpeed">Shore Foam Speed</label>
+                                <span class="oc-value" id="oc-shoreFoamSpeedVal">0.80x</span>
+                            </div>
+                            <input class="oc-slider" type="range" id="oc-shoreFoamSpeed" min="0" max="4" value="0.8" step="0.05"/>
+                        </div>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label for="oc-shoreFoamStrength">Shore Foam Strength</label>
+                                <span class="oc-value" id="oc-shoreFoamStrengthVal">1.00</span>
+                            </div>
+                            <input class="oc-slider" type="range" id="oc-shoreFoamStrength" min="0" max="3" value="1" step="0.05"/>
+                        </div>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label for="oc-shoreRefraction">Shore Refraction</label>
+                                <span class="oc-value" id="oc-shoreRefractionVal">0.35</span>
+                            </div>
+                            <input class="oc-slider" type="range" id="oc-shoreRefraction" min="0" max="2" value="0.35" step="0.01"/>
+                        </div>
+                    </div>
+
+                    <!-- Tab 4: Atmosphere & Colors -->
                     <div class="oc-tab-content" id="oc-tab-atmosphere">
                         <div class="oc-control">
                             <div class="oc-control-head">
@@ -599,8 +690,36 @@ export class WaterModalUI {
                         </div>
                     </div>
 
-                    <!-- Tab 4: View -->
+                    <!-- Tab 5: View & Performance -->
                     <div class="oc-tab-content" id="oc-tab-view">
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label>Shader Quality Mode</label>
+                            </div>
+                            <div class="oc-preset-grid" style="grid-template-columns: 1fr 1fr;">
+                                <button class="oc-preset-btn active" id="oc-mode-high" data-mode="high">🌟 High (Cinematic)</button>
+                                <button class="oc-preset-btn" id="oc-mode-perf" data-mode="performance">⚡ Fast (High FPS)</button>
+                            </div>
+                        </div>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label>Mesh Density / Resolution</label>
+                            </div>
+                            <div class="oc-preset-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+                                <button class="oc-preset-btn active" id="oc-res-512" data-res="512">512 (Ultra)</button>
+                                <button class="oc-preset-btn" id="oc-res-256" data-res="256">256 (Med)</button>
+                                <button class="oc-preset-btn" id="oc-res-128" data-res="128">128 (Fast)</button>
+                            </div>
+                        </div>
+
+                        <div class="oc-control">
+                            <div class="oc-control-head">
+                                <label>Distance Quality LOD (Reduces Far Noise)</label>
+                            </div>
+                            <button class="oc-pill-btn active" id="oc-lod-toggle">Distance LOD: ON</button>
+                        </div>
+
                         <div class="oc-control">
                             <div class="oc-control-head">
                                 <label>Surface Wireframe</label>
@@ -609,7 +728,7 @@ export class WaterModalUI {
                         </div>
                     </div>
 
-                    <!-- Tab 5: Debug -->
+                    <!-- Tab 6: Debug -->
                     <div class="oc-tab-content" id="oc-tab-debug">
                         <div class="oc-control">
                             <div class="oc-control-head">
@@ -756,7 +875,35 @@ export class WaterModalUI {
             }, v => `${Math.round(v)}°`);
         }
 
-        // Tab 3: Atmosphere & Color Presets
+        // Tab 3: Shore
+        bindSlider('oc-shoreDepth', 'oc-shoreDepthVal', (v) => {
+            shoreDepthUniform.value = v;
+        }, v => `${v.toFixed(1)}m`);
+
+        bindSlider('oc-shoreOpacity', 'oc-shoreOpacityVal', (v) => {
+            shoreOpacityUniform.value = v / 100.0;
+        }, v => `${Math.round(v)}%`);
+
+        bindSlider('oc-shoreFoamWidth', 'oc-shoreFoamWidthVal', (v) => {
+            shoreFoamWidthUniform.value = v;
+        }, v => `${v.toFixed(1)}m`);
+
+        bindSlider('oc-shoreFoamSpeed', 'oc-shoreFoamSpeedVal', (v) => {
+            shoreFoamSpeedUniform.value = v;
+        }, v => `${v.toFixed(2)}x`);
+
+        bindSlider('oc-shoreFoamStrength', 'oc-shoreFoamStrengthVal', (v) => {
+            shoreFoamStrengthUniform.value = v;
+        }, v => `${v.toFixed(2)}`);
+
+        bindSlider('oc-shoreRefraction', 'oc-shoreRefractionVal', (v) => {
+            shoreRefractionUniform.value = v;
+        }, v => `${v.toFixed(2)}`);
+
+        modal.querySelector('#oc-col-sand').addEventListener('input', e => sandColorUniform.value.set(e.target.value));
+        modal.querySelector('#oc-col-shoreShallow').addEventListener('input', e => shoreShallowColorUniform.value.set(e.target.value));
+
+        // Tab 4: Atmosphere & Color Presets
         const presets = {
             deep: { deep: '#04171c', shallow: '#0f525c', sun: '#ffffff', horizon: '#85adae' },
             tropical: { deep: '#062d3e', shallow: '#14b8a6', sun: '#ffffff', horizon: '#99e6ff' },
@@ -791,7 +938,38 @@ export class WaterModalUI {
         modal.querySelector('#oc-col-sun').addEventListener('input', e => sunColorUniform.value.set(e.target.value));
         modal.querySelector('#oc-col-horizon').addEventListener('input', e => horizonColorUniform.value.set(e.target.value));
 
-        // Tab 4: View Wireframe
+        // Tab 5: View & Performance
+        const modeHighBtn = modal.querySelector('#oc-mode-high');
+        const modePerfBtn = modal.querySelector('#oc-mode-perf');
+        if (modeHighBtn && modePerfBtn) {
+            modeHighBtn.addEventListener('click', () => {
+                this.waterSystem.setQualityMode('high');
+                this.syncQualityUI();
+            });
+            modePerfBtn.addEventListener('click', () => {
+                this.waterSystem.setQualityMode('performance');
+                this.syncQualityUI();
+            });
+        }
+
+        ['512', '256', '128'].forEach(res => {
+            const btn = modal.querySelector(`#oc-res-${res}`);
+            if (btn) {
+                btn.addEventListener('click', () => {
+                    this.waterSystem.setMeshResolution(res);
+                    this.syncQualityUI();
+                });
+            }
+        });
+
+        const lodBtn = modal.querySelector('#oc-lod-toggle');
+        if (lodBtn) {
+            lodBtn.addEventListener('click', () => {
+                this.waterSystem.setDistanceLod(!this.waterSystem.distanceLod);
+                this.syncQualityUI();
+            });
+        }
+
         const wireframeBtn = modal.querySelector('#oc-wireframe-toggle');
         wireframeBtn.addEventListener('click', () => {
             if (this.waterSystem.openSeaMaterial) {
@@ -802,7 +980,7 @@ export class WaterModalUI {
             }
         });
 
-        // Tab 5: Debug Visibility & Reset
+        // Tab 6: Debug Visibility & Reset
         const visBtn = modal.querySelector('#oc-vis-toggle');
         visBtn.addEventListener('click', () => {
             this.waterSystem.setVisible(!this.waterSystem.visible);
@@ -820,9 +998,66 @@ export class WaterModalUI {
             waterOpacityUniform.value = 0.92;
             foamAmountUniform.value = 1.0;
             detailAmountUniform.value = 1.0;
+            sandColorUniform.value.set(SHORE_DEFAULTS.sand);
+            shoreShallowColorUniform.value.set(SHORE_DEFAULTS.shoreShallow);
+            shoreDepthUniform.value = SHORE_DEFAULTS.shoreDepth;
+            shoreOpacityUniform.value = SHORE_DEFAULTS.shoreOpacity;
+            shoreFoamWidthUniform.value = SHORE_DEFAULTS.shoreFoamWidth;
+            shoreFoamSpeedUniform.value = SHORE_DEFAULTS.shoreFoamSpeed;
+            shoreFoamStrengthUniform.value = SHORE_DEFAULTS.shoreFoamStrength;
+            shoreRefractionUniform.value = SHORE_DEFAULTS.shoreRefraction;
             this.waterSystem.setHeight(2.4);
+            this.waterSystem.setQualityMode('high');
+            this.syncQualityUI();
+            this.updateShoreUI();
             presetBtns[0].click();
         });
+    }
+
+    updateShoreUI() {
+        const setSlider = (id, valId, value, format) => {
+            const el = this.dom.querySelector(`#${id}`);
+            const valEl = this.dom.querySelector(`#${valId}`);
+            if (el) el.value = value;
+            if (valEl) valEl.textContent = format(value);
+        };
+
+        setSlider('oc-shoreDepth', 'oc-shoreDepthVal', shoreDepthUniform.value, v => `${v.toFixed(1)}m`);
+        setSlider('oc-shoreOpacity', 'oc-shoreOpacityVal', shoreOpacityUniform.value * 100, v => `${Math.round(v)}%`);
+        setSlider('oc-shoreFoamWidth', 'oc-shoreFoamWidthVal', shoreFoamWidthUniform.value, v => `${v.toFixed(1)}m`);
+        setSlider('oc-shoreFoamSpeed', 'oc-shoreFoamSpeedVal', shoreFoamSpeedUniform.value, v => `${v.toFixed(2)}x`);
+        setSlider('oc-shoreFoamStrength', 'oc-shoreFoamStrengthVal', shoreFoamStrengthUniform.value, v => `${v.toFixed(2)}`);
+        setSlider('oc-shoreRefraction', 'oc-shoreRefractionVal', shoreRefractionUniform.value, v => `${v.toFixed(2)}`);
+
+        const sandEl = this.dom.querySelector('#oc-col-sand');
+        if (sandEl) sandEl.value = '#' + sandColorUniform.value.getHexString();
+        const shallowEl = this.dom.querySelector('#oc-col-shoreShallow');
+        if (shallowEl) shallowEl.value = '#' + shoreShallowColorUniform.value.getHexString();
+    }
+
+    syncQualityUI() {
+        const isHigh = this.waterSystem.qualityMode === 'high';
+        const modeHighBtn = this.dom.querySelector('#oc-mode-high');
+        const modePerfBtn = this.dom.querySelector('#oc-mode-perf');
+        if (modeHighBtn && modePerfBtn) {
+            modeHighBtn.classList.toggle('active', isHigh);
+            modePerfBtn.classList.toggle('active', !isHigh);
+        }
+
+        const currentRes = String(this.waterSystem.meshResolution);
+        ['512', '256', '128'].forEach(res => {
+            const btn = this.dom.querySelector(`#oc-res-${res}`);
+            if (btn) {
+                btn.classList.toggle('active', currentRes === res);
+            }
+        });
+
+        const lodBtn = this.dom.querySelector('#oc-lod-toggle');
+        if (lodBtn) {
+            const isOn = this.waterSystem.distanceLod;
+            lodBtn.classList.toggle('active', isOn);
+            lodBtn.textContent = isOn ? 'Distance LOD: ON' : 'Distance LOD: OFF';
+        }
     }
 
     updateSpectrumUI() {

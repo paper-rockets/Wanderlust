@@ -5,51 +5,35 @@ uniform sampler2D uSandNoiseMap;
 varying vec3 vWorldPos;
 varying vec3 vViewPos;
 
-float hash(vec2 p) {
-    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123);
-}
-
 void applyTerrainShaders(inout vec4 fragColor, vec3 normal) {
     vec3 viewDir = normalize(vViewPos);
     vec3 norm = normalize(normal);
     vec3 lightDir = normalize(uSunDir);
     vec3 halfDir = normalize(lightDir + viewDir);
-    float lightFacing = clamp(dot(norm, lightDir), 0.0, 1.0);
-    float nDotH = clamp(dot(norm, halfDir), 0.0, 1.0);
+    vec3 ref = reflect(-viewDir, norm);
     
     // 1. Detect Sand / Warm Dune Surface
     float isSand = step(0.45, fragColor.r) * step(fragColor.b, fragColor.r * 0.95);
     
     if (isSand > 0.1) {
-        // 1. Broad Radiant Fresnel Edge Glow (Sunlit dune crest rim lighting)
+        // Dune Rim Lighting (Fresnel glow along grazing angles and dune ridges)
         float rim = 1.0 - clamp(dot(norm, viewDir), 0.0, 1.0);
-        float rimGlowStrength = pow(rim, 3.0) * (lightFacing * 0.75 + 0.25) * 0.65;
-        vec3 rimGlow = vec3(1.0, 0.82, 0.48) * rimGlowStrength;
-
-        // 2. High-Frequency Sparkling Diamond Sand Grains (Multi-scale Glitter)
-        vec2 gridUV1 = floor(vWorldPos.xz * 2.2 + viewDir.xz * 6.0);
-        vec2 gridUV2 = floor(vWorldPos.xz * 5.5 - viewDir.xz * 10.0);
-        float sparkle1 = hash(gridUV1);
-        float sparkle2 = hash(gridUV2 + vec2(7.13, 3.71));
-        float sparkle = pow(sparkle1 * sparkle2, 5.0) * 16.0;
-
-        // Texture-assisted micro glints
-        vec2 sandUV1 = vWorldPos.xz * 0.15;
-        vec2 sandUV2 = vWorldPos.xz * 0.35;
-        float texNoise = texture2D(uSandNoiseMap, sandUV1).r * 0.6 + texture2D(uSandNoiseMap, sandUV2).g * 0.4;
-        float texSparkle = pow(texNoise, 2.2) * 2.5;
-
-        // 3. Blinn-Phong Specular Sheen
-        float specSheen = pow(nDotH, 16.0) * lightFacing * 1.2;
+        float rimStrength = pow(rim, 4.5) * 0.5;
+        vec3 rimGlow = vec3(1.0, 0.72, 0.38) * rimStrength;
         
-        // Combine glittering sparkle with specular sheen & grazing rim sparkle
-        float totalGlitter = (specSheen * (sparkle + 0.4) + sparkle * 0.5 + texSparkle * 0.3) * lightFacing;
-        vec3 specColor = totalGlitter * vec3(1.0, 0.88, 0.62) * uShimmerMult;
-
-        // Warm ambient terracotta backscatter in dune shadows
-        vec3 warmBackscatter = vec3(0.06, 0.02, 0.008) * (1.0 - lightFacing);
-
-        fragColor.rgb += (rimGlow + specColor + warmBackscatter) * isSand;
+        // Journey Sand Specular Glitter (Blinn-Phong Specular)
+        float mainSpec = clamp(dot(norm, halfDir), 0.0, 1.0);
+        mainSpec = pow(mainSpec, 12.0) * 4.5;
+        
+        float textureGlitter = texture2D(uSandNoiseMap, vWorldPos.xz * 0.07).r * 1.2;
+        textureGlitter = pow(clamp(textureGlitter, 0.0, 1.0), 1.8);
+        mainSpec *= textureGlitter;
+        
+        float rimSpec = pow(rim, 2.8) * textureGlitter * 2.5;
+        vec3 specColor = (mainSpec + rimSpec) * vec3(1.0, 0.82, 0.55) * uShimmerMult;
+        
+        // Apply Sand Shader Effects without stripe artifacts
+        fragColor.rgb += (rimGlow + specColor) * isSand;
     }
 
     // 2. Detect Snow / North Pole Glacial Surface

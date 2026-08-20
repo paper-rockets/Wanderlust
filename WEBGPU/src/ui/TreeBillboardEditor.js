@@ -4,8 +4,72 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 export const TREE_PRESETS = [
     {
+        key: 'stylized_pine_var1',
+        name: 'Stylized Pine 1 (Tall Majestic)',
+        glbPath: 'assets/stylized_pine_var1.glb',
+        billboardPath: 'assets/tree_billboard_pine_1_norm.png',
+        targetHeight: 22.0,
+        baseColorHex: '#2ea84b'
+    },
+    {
+        key: 'stylized_pine_var2',
+        name: 'Stylized Pine 2 (Full Tiered)',
+        glbPath: 'assets/stylized_pine_var2.glb',
+        billboardPath: 'assets/tree_billboard_pine_2.png',
+        targetHeight: 22.0,
+        baseColorHex: '#3fa34d'
+    },
+    {
+        key: 'stylized_pine_var3',
+        name: 'Stylized Pine 3 (Mountain)',
+        glbPath: 'assets/Pine/stylized_pine_var3.glb',
+        billboardPath: 'assets/tree_billboard_pine_3.png',
+        targetHeight: 21.0,
+        baseColorHex: '#277435'
+    },
+    {
+        key: 'stylized_pine_var4',
+        name: 'Stylized Pine 4 (Dense Alpine)',
+        glbPath: 'assets/Pine/stylized_pine_var4.glb',
+        billboardPath: 'assets/tree_billboard_pine_4.png',
+        targetHeight: 20.0,
+        baseColorHex: '#329041'
+    },
+    {
+        key: 'small_stylized_pine_var1',
+        name: 'Small Stylized Pine 1',
+        glbPath: 'assets/small_stylized_pine_var1.glb',
+        billboardPath: 'assets/tree_billboard_pine_5.png',
+        targetHeight: 15.0,
+        baseColorHex: '#44c838'
+    },
+    {
+        key: 'small_stylized_pine_var2',
+        name: 'Small Stylized Pine 2 (Highland)',
+        glbPath: 'assets/Pine/small_stylized_pine_var2.glb',
+        billboardPath: 'assets/tree_billboard_pine_6.png',
+        targetHeight: 14.0,
+        baseColorHex: '#2ea84b'
+    },
+    {
+        key: 'small_stylized_pine_var3',
+        name: 'Small Stylized Pine 3 (Dwarf)',
+        glbPath: 'assets/small_stylized_pine_var3.glb',
+        billboardPath: 'assets/tree_billboard_pine_7.png',
+        targetHeight: 12.0,
+        baseColorHex: '#38b000'
+    },
+    {
+        key: 'sapling_stylized_pine',
+        name: 'Sapling Pine',
+        glbPath: 'assets/Pine/sapling_stylized_pine.glb',
+        billboardPath: 'assets/tree_billboard_pine_1_norm.png',
+        targetHeight: 8.0,
+        baseColorHex: '#64d848'
+    },
+    {
         key: 'pine_ultra_fast',
-        name: 'Pine (Ultra Fast)',
+        name: 'Pine (Ultra Fast Classic)',
         glbPath: 'assets/Pine_ultra_fast.glb',
         billboardPath: 'assets/tree_billboard_pine_1_norm.png',
         targetHeight: 22.0,
@@ -13,7 +77,7 @@ export const TREE_PRESETS = [
     },
     {
         key: 'pine_1_ultra_fast',
-        name: 'Pine Alt (Ultra Fast 1)',
+        name: 'Pine Alt (Ultra Fast Spire)',
         glbPath: 'assets/Pine_1_ultra_fast.glb',
         billboardPath: 'assets/tree_billboard_pine_2.png',
         targetHeight: 22.0,
@@ -286,7 +350,10 @@ export class TreeBillboardEditor {
         this.applyCallbacks = [];
 
         this.initUI();
-        this.initPreviewScene();
+        // NOT here. initPreviewScene() builds a THREE.WebGLRenderer, and this is a WebGPU build:
+        // when the browser cannot hand out a WebGL context, getContext() returns null and three
+        // throws on gl.getSupportedExtensions(), which killed startup and left a black screen.
+        // The preview is only needed once the panel is opened, so it is created there instead.
         this.loadCurrentPreset();
     }
 
@@ -639,6 +706,8 @@ export class TreeBillboardEditor {
     }
 
     initPreviewScene() {
+        if (this.previewRenderer) return true;
+        try {
         this.previewScene = new THREE.Scene();
         this.previewScene.background = new THREE.Color(0x060a08);
 
@@ -701,6 +770,12 @@ export class TreeBillboardEditor {
             }
         };
         animate();
+            return true;
+        } catch (e) {
+            console.warn('[TreeBillboardEditor] preview disabled - no WebGL context:', e && e.message);
+            this.previewRenderer = null;
+            return false;
+        }
     }
 
     resetSliders() {
@@ -721,6 +796,8 @@ export class TreeBillboardEditor {
         this.isPanelVisible = visible !== undefined ? visible : !this.isPanelVisible;
         this.panelEl.style.display = this.isPanelVisible ? 'block' : 'none';
         if (this.isPanelVisible) {
+            this.initPreviewScene();            // lazy: first open builds the preview renderer
+            if (!this.previewRenderer) return;  // no WebGL -> panel still opens, just no preview
             this.previewRenderer.setSize(this.viewportContainer.clientWidth, this.viewportContainer.clientHeight);
             this.previewCamera.aspect = this.viewportContainer.clientWidth / this.viewportContainer.clientHeight;
             this.previewCamera.updateProjectionMatrix();
@@ -777,7 +854,9 @@ export class TreeBillboardEditor {
             });
         }
 
-        // Update 3D Preview Mesh
+        // Update 3D Preview Mesh. The preview scene is built lazily on first panel open, so
+        // everything below is a no-op until then (and if WebGL is unavailable, permanently).
+        if (!this.preview3DGroup) return;
         while (this.preview3DGroup.children.length > 0) {
             this.preview3DGroup.remove(this.preview3DGroup.children[0]);
         }

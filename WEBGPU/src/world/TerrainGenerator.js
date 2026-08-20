@@ -12,19 +12,25 @@ function smoothstep(min, max, value) {
 const ZONE_OCEAN = ZONES.find(z => z.name.includes('Ocean')) || ZONES[0];
 const ZONE_ARCHIPELAGO = ZONES.find(z => z.name.includes('Archipelago')) || ZONES[0];
 const ZONE_GHIBLI = ZONES.find(z => z.name.includes('Ghibli')) || ZONES[1];
-const ZONE_MISTY = ZONES.find(z => z.name.includes('Misty')) || ZONES[2];
-const ZONE_JUNGLE = ZONES.find(z => z.name.includes('Jungle')) || ZONES[3];
-const ZONE_CRYSTAL = ZONES.find(z => z.name.includes('Crystal')) || ZONES[4];
-const ZONE_DESERT = ZONES.find(z => z.name.includes('Desert')) || ZONES[6];
-const ZONE_NORTHPOLE = ZONES.find(z => z.name.includes('North Pole')) || ZONES[7];
+const ZONE_PLAINS = ZONES.find(z => z.name.includes('Golden')) || ZONES[2];
+const ZONE_MISTY = ZONES.find(z => z.name.includes('Misty')) || ZONES[3];
+const ZONE_JUNGLE = ZONES.find(z => z.name.includes('Jungle')) || ZONES[4];
+const ZONE_CRYSTAL = ZONES.find(z => z.name.includes('Crystal')) || ZONES[5];
+const ZONE_DESERT = ZONES.find(z => z.name.includes('Desert')) || ZONES[7];
+const ZONE_CANYON = ZONES.find(z => z.name.includes('Canyon')) || ZONES[8];
+const ZONE_NORTHPOLE = ZONES.find(z => z.name.includes('North Pole')) || ZONES[9];
 
 function getBiomeFromTempMoist(temp, moist) {
     if (temp < 0.33) {
         return (moist > 0.50) ? ZONE_NORTHPOLE : ZONE_MISTY;
     } else if (temp <= 0.66) {
-        return ZONE_GHIBLI;
+        return (moist > 0.50) ? ZONE_GHIBLI : ZONE_PLAINS;
     } else {
-        return (moist > 0.50) ? ZONE_JUNGLE : ZONE_DESERT;
+        if (moist > 0.50) {
+            return ZONE_JUNGLE;
+        } else {
+            return (moist < 0.20) ? ZONE_CANYON : ZONE_DESERT;
+        }
     }
 }
 
@@ -109,9 +115,13 @@ export function getIslandData(worldX, worldZ) {
 }
 
 export function getBiomeAt(worldX, worldZ) {
+    if (worldX === undefined || isNaN(worldX) || worldZ === undefined || isNaN(worldZ)) {
+        return ZONE_OCEAN || ZONES[0];
+    }
     const data = getIslandData(worldX, worldZ);
-    if (data.mask === 0) return ZONE_OCEAN;
-    return data.mainBiome;
+    if (!data) return ZONE_OCEAN || ZONES[0];
+    if (data.mask === 0) return ZONE_OCEAN || ZONES[0];
+    return data.mainBiome || ZONE_OCEAN || ZONES[0];
 }
 
 export function getWorldHeight(worldX, worldZ) {
