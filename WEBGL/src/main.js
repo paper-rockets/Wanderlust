@@ -51,7 +51,10 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
     let shadowDistMode = LOW_GFX ? 'Close' : 'Med';
     let isBloomOn = false;
     let isHD = true;
-    let cameraZoomDist = Math.max(6.0, parseFloat(localStorage.getItem('wl_zoomDist')) || 12.0);
+    const _isMobileDevice = /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 0 && Math.min(screen.width, screen.height) < 820);
+    let cameraZoomDist = parseFloat(localStorage.getItem('wl_zoomDist')) || (_isMobileDevice ? 22.0 : 12.0);
+    if (_isMobileDevice && cameraZoomDist < 14.0) cameraZoomDist = 22.0;
+    cameraZoomDist = Math.max(6.0, cameraZoomDist);
     let currentFrame = 0;
     let logicTimer = 0;
     let animeWaterSystem = null;
@@ -5286,8 +5289,9 @@ import { composer, renderPass, bloomPass, godRaysPass, summerPass, initPostProce
             const dy = e.touches[0].clientY - e.touches[1].clientY;
             const newDist = Math.sqrt(dx*dx + dy*dy);
             
-            cameraZoomDist = initialZoomDist * (initialPinchDist / newDist);
-            cameraZoomDist = Math.max(6.0, Math.min(300.0, cameraZoomDist));
+            cameraZoomDist = initialZoomDist * (newDist / initialPinchDist);
+            const _mobileZoomMin = _isMobileDevice ? 12.0 : 6.0;
+            cameraZoomDist = Math.max(_mobileZoomMin, Math.min(300.0, cameraZoomDist));
             localStorage.setItem('wl_zoomDist', cameraZoomDist);
 
             const zoomToggleBtn = document.getElementById('zoom-toggle');
