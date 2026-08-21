@@ -32,8 +32,10 @@ import { setupGodMode, toggleGodMode, updateGodMode } from './physics/GodMode.js
 
 import { MeshToonNodeMaterial, MeshStandardNodeMaterial, MeshBasicNodeMaterial, PointsNodeMaterial } from 'three/webgpu';
 import { uniform, texture, Fn, positionLocal, abs, positionGeometry, sin, step, positionWorld, normalWorld, cameraPosition, float, vec2, vec3, vec4, dot, fract, mix, pow, clamp, normalize, smoothstep as tslSmoothstep, attribute } from 'three/tsl';
-import { scene, camera, renderer, clock } from './core/Engine.js';
-import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, godRaysPass, initPostProcessingUI, uRolloffKnee } from './core/PostProcessing.js';
+import { scene, camera, renderer, clock, applyRenderBudget } from './core/Engine.js';
+import { deviceTier, tierSettings, budgetedPixelRatio, AdaptiveResolution, describeTier } from './core/DeviceTier.js';
+import { GhibliTreeSystem } from './entities/GhibliTreeSystem.js';
+import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, godRaysPass, initPostProcessingUI, uRolloffKnee, setGodRaySunVisible, uPhaseExposure, uDitherAmount } from './core/PostProcessing.js';
 
     import { initTerrainEditor } from '../TerrainEditor.js';
     import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
@@ -53,6 +55,8 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     import { FLIGHT_MODELS } from './config/FlightModelsConfig.js';
     import { FlightModelManager } from './entities/FlightModelManager.js';
     import { BiplaneEngineAudio } from './audio/BiplaneEngineAudio.js';
+    import { AMBIENT_TRACKS } from './audio/AmbientMusic.js';
+    const tracks = AMBIENT_TRACKS;
 
     // Wait for WebGPU Backend to initialize before doing ANY graph or material allocations
     await renderer.init();
@@ -74,7 +78,17 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     let isTreeShadowsOn = false;
     let shadowDistMode = LOW_GFX ? 'Close' : 'Med';
     let isBloomOn = false;
-    let isHD = true;
+    // Adaptive resolution: samples frame time and nudges the render scale. Targets ~30fps
+    // (4K does not need 60). Hysteresis in AdaptiveResolution stops the screen breathing.
+    const adaptiveRes = new AdaptiveResolution({
+        onScaleChange: (scale) => {
+            applyRenderBudget(scale);
+            if (typeof params !== 'undefined') params.renderScale = scale;
+            if (composer && typeof composer.setSize === 'function') {
+                composer.setSize(window.innerWidth, window.innerHeight);
+            }
+        }
+    });
     let cameraZoomDist = parseFloat(localStorage.getItem('wl_zoomDist')) || 12.0;
     let currentFrame = 0;
     let logicTimer = 0;
@@ -88,6 +102,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     let isGodMode = false;
     let godCamera = null;
     let godControls = null;
+    let cameraBase = null;
     let isInitializingGui = true;
 
     // Clouds config
@@ -335,15 +350,17 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     let flightModelDropdownController = null;
     let soundMuteController = null;
     let engineSoundController = null;
+    let trackDropdownController = null;
     let flightFolder = null;
     let audioFolder = null;
     let presetsFolder = null;
     let presetDropdownControllers = [];
 
-    const gui = new GUI();
+    const gui = new GUI({ title: 'Controls & Settings' });
     const params = {
         worldMode: 'Islands',
         sceneFog: true,
+        showFog: true,
         fogIntensity: 3.5,   // dense golden-hour fog; higher = denser (far = 800/fogIntensity)
         terrainSmoothing: 0.0,
         trails: isWindTrailsOn, lockSunToPlayer: true,
@@ -352,7 +369,11 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         shadowDist: shadowDistMode,
         bloom: isBloomOn,
         terrainRes: String(terrainRes),
-        renderHD: isHD,
+        autoResolution: true,
+        renderScale: 1.0,
+        exposureTrim: 1.0,
+        dayExposure: 0.62,
+        nightExposure: 1.35,
         treeColor0: '#ffffff',
         treeColor1: '#ddff88',
         treeColor2: '#88cc99',
@@ -379,6 +400,12 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         highlightKnee: 0.75,
         horizonGlow: 0.45,
         treeScale: 1.5,
+        ghibliTreeScale: 1.2,
+        ghibliTreeDensity: 1.0,
+        ghibliTreeMinDist: 4.5,
+        ghibliTreeMinHeight: 6.8,
+        ghibliTreeMaxHeight: 58.0,
+        ghibliTreeWindSway: 1.0,
         quality: LOW_GFX ? 'Low' : 'Regular',
         showTerrain: true,
         showWater: true,
@@ -423,6 +450,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         birdFlockRadius: 35,
         birdFlockSpread: 12,
         birdMaxSpeed: 45,
+        godMode: false,
     };
 
     const toonShaderManager = new ToonShaderManager();
@@ -687,10 +715,20 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         localStorage.setItem('gfxQuality', v === 'Low' ? 'low' : 'regular');
         if (!isInitializingGui) location.reload();
     });
-    perfFolder.add(params, 'renderHD').name('Render HD').onChange(v => {
-        isHD = v;
-        renderer.setPixelRatio(isHD ? Math.min(window.devicePixelRatio, 2) : 0.5);
+    perfFolder.add(params, 'autoResolution').name('Auto Resolution').onChange(v => {
+        adaptiveRes.setEnabled(v);
+        if (v) { adaptiveRes.reset(); applyRenderBudget(1.0); }
+        else { applyRenderBudget(params.renderScale); }
     });
+    perfFolder.add(params, 'renderScale', 0.5, 1.0, 0.05).name('Render Scale').onChange(v => {
+        // Manual choice wins: turn auto off so the two don't fight over the framebuffer.
+        if (params.autoResolution) { params.autoResolution = false; adaptiveRes.setEnabled(false); gui.controllersRecursive().forEach(c => c.updateDisplay && c.updateDisplay()); }
+        applyRenderBudget(v);
+    });
+    perfFolder.add({ tier: describeTier() }, 'tier').name('Detected Tier').disable();
+    // Anti-banding. 0 = off (banding returns), 1 = correct 1-LSB dither, higher = visible grain.
+    perfFolder.add({ dither: uDitherAmount.value }, 'dither', 0.0, 3.0, 0.1).name('Dither (anti-band)')
+        .onChange(v => uDitherAmount.value = v);
     perfFolder.add(params, 'terrainRes', ['256', '128', '64']).name('Terrain Res').onChange(v => {
         terrainRes = parseInt(v);
         const newGeo = new THREE.PlaneGeometry(4000, 4000, terrainRes, terrainRes);
@@ -766,16 +804,16 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             const btn = document.getElementById('editor-toggle');
             if (btn) btn.click();
         }
-    }}, 'openTerrainEditor').name('🔧 Terrain Editor');
+    }}, 'openTerrainEditor').name('Terrain Editor');
     editorFolder.add({ openCrystalEditor: () => {
         const crystalEditor = document.getElementById('crystal-editor');
         if (crystalEditor) crystalEditor.style.display = crystalEditor.style.display === 'none' ? 'block' : 'none';
-    }}, 'openCrystalEditor').name('💎 Edit Crystals');
+    }}, 'openCrystalEditor').name('Edit Crystals');
     editorFolder.add({ openTreeBillboardEditor: () => {
         if (window.treeBillboardEditor) {
             window.treeBillboardEditor.togglePanel(true);
         }
-    }}, 'openTreeBillboardEditor').name('🌲 Tree & Billboard Editor');
+    }}, 'openTreeBillboardEditor').name('Tree & Billboard Editor');
 
     editorFolder.add({ loadCustomModel: () => {
         const input = document.createElement('input');
@@ -788,9 +826,9 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             }
         };
         input.click();
-    }}, 'loadCustomModel').name('📦 Load Custom Toon Model');
+    }}, 'loadCustomModel').name('Load Custom Toon Model');
 
-    customModelFolder = editorFolder.addFolder('📦 Custom Model');
+    customModelFolder = editorFolder.addFolder('Custom Model');
     customModelFolder.close();
 
     params.selectedModelIdx = 0;
@@ -843,11 +881,11 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
 
     customModelFolder.add({ cloneModel: () => {
         if (window.cloneSelectedModel) window.cloneSelectedModel();
-    }}, 'cloneModel').name('👥 Clone Selected');
+    }}, 'cloneModel').name('Clone Selected');
 
     customModelFolder.add({ deleteModel: () => {
         if (window.deleteSelectedModel) window.deleteSelectedModel();
-    }}, 'deleteModel').name('🗑️ Delete Selected');
+    }}, 'deleteModel').name('Delete Selected');
 
     // Flight Models Folder
     flightFolder = gui.addFolder('Flight Models');
@@ -864,7 +902,12 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     flightModelDropdownController = flightFolder.add(flightParams, 'modelId', flightModelOptions)
         .name('Active Model')
         .onChange(id => {
-            if (typeof flightModelManager !== 'undefined' && flightModelManager) flightModelManager.setModelById(id);
+            if (typeof flightModelManager !== 'undefined' && flightModelManager) {
+                const cur = flightModelManager.getCurrentConfig();
+                if (!cur || cur.id !== id) {
+                    flightModelManager.setModelById(id);
+                }
+            }
         });
     flightFolder.add(flightParams, 'nextModel').name('Next Model');
     flightFolder.add(flightParams, 'prevModel').name('Previous Model');
@@ -883,17 +926,33 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         engineSound: true,
         engineVolume: 0.038,
         music: false,
+        autoAdvance: true,
+        currentTrack: tracks[0].name,
+        nextTrack: () => {
+            if (typeof selectMusicTrack === 'function') {
+                selectMusicTrack(currentTrack + 1);
+            } else {
+                document.getElementById('track-toggle')?.click();
+            }
+        },
         wind: isWindOn,
-        nextTrack: () => document.getElementById('track-toggle')?.click(),
         toggleMasterSound: () => { if (typeof setSoundMuted === 'function') setSoundMuted(!isSoundMuted); },
         toggleEngineSound: () => { if (typeof setEngineSoundEnabled === 'function') setEngineSoundEnabled(!isEngineSoundOn); }
     };
     soundMuteController = audioFolder.add(audioParams, 'soundEnabled')
         .name('Sound Enabled')
-        .onChange(v => { if (typeof setSoundMuted === 'function') setSoundMuted(!v); });
+        .onChange(v => {
+            if (typeof setSoundMuted === 'function' && isSoundMuted !== !v) {
+                setSoundMuted(!v);
+            }
+        });
     engineSoundController = audioFolder.add(audioParams, 'engineSound')
         .name('Biplane Engine Sound')
-        .onChange(v => { if (typeof setEngineSoundEnabled === 'function') setEngineSoundEnabled(v); });
+        .onChange(v => {
+            if (typeof setEngineSoundEnabled === 'function' && isEngineSoundOn !== !!v) {
+                setEngineSoundEnabled(v);
+            }
+        });
     audioFolder.add(audioParams, 'engineVolume', 0.0, 0.2, 0.005)
         .name('Engine Volume')
         .onChange(v => {
@@ -903,6 +962,17 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         const btn = document.getElementById('music-toggle');
         if (btn) btn.click();
     });
+    audioFolder.add(audioParams, 'autoAdvance').name('Auto-Advance Songs').onChange(v => {
+        isAutoAdvance = !!v;
+    });
+    trackDropdownController = audioFolder.add(audioParams, 'currentTrack', tracks.map(t => t.name))
+        .name('Current Track')
+        .onChange(name => {
+            const idx = tracks.findIndex(t => t.name === name);
+            if (idx !== -1 && idx !== currentTrack && typeof selectMusicTrack === 'function') {
+                selectMusicTrack(idx);
+            }
+        });
     audioFolder.add(audioParams, 'nextTrack').name('Next Track');
     audioFolder.add(params, 'wind').name('Wind Sound').onChange(v => {
         isWindOn = v;
@@ -910,7 +980,218 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     audioFolder.add(audioParams, 'toggleMasterSound').name('Toggle Master Sound');
     audioFolder.add(audioParams, 'toggleEngineSound').name('Toggle Engine Sound');
 
-    const debugFolder = gui.addFolder('🔧 Debug Render');
+    // Ghibli Trees GUI Folder
+    const ghibliTreeFolder = gui.addFolder('Ghibli Trees');
+    ghibliTreeFolder.add(params, 'showTrees').name('Trees Visible').onChange(v => {
+        if (typeof treeMeshes !== 'undefined') treeMeshes.forEach(m => m.visible = v);
+        if (window.instJungleTreeParts) window.instJungleTreeParts.forEach(m => m.visible = v);
+        if (window.instPalmTreeParts) window.instPalmTreeParts.forEach(m => m.visible = v);
+    });
+    // These drive BOTH tree systems: the legacy instanced pines AND the Background Tree Atlas
+    // trees. Wiring only the pines is what made "Tree Scale" look dead -- the trees actually on
+    // screen in Ghibli Land are the atlas ones.
+    const _bgTrees = () => window.ghibliTrees;
+
+    ghibliTreeFolder.add(params, 'ghibliTreeScale', 0.2, 3.5, 0.05).name('Tree Scale').onChange(v => {
+        if (typeof window.updateGhibliTreeScale === 'function') window.updateGhibliTreeScale(v);
+        const t = _bgTrees();
+        if (t) { t.scaleMul = v; t.respawn(); }
+    });
+    ghibliTreeFolder.add(params, 'ghibliTreeDensity', 0.1, 3.0, 0.05).name('Tree Density').onChange(v => {
+        if (typeof window.respawnGhibliTrees === 'function') window.respawnGhibliTrees();
+        const t = _bgTrees();
+        if (t) { t.density = v; t.respawn(); }
+    });
+    ghibliTreeFolder.add(params, 'ghibliTreeMinDist', 6.0, 30.0, 0.5).name('Min Spacing').onChange(v => {
+        if (typeof window.respawnGhibliTrees === 'function') window.respawnGhibliTrees();
+        // Cell size IS the spacing guarantee for the atlas trees, so this maps directly.
+        const t = _bgTrees();
+        if (t && typeof t.setCellSize === 'function') t.setCellSize(v * 2.4);
+    });
+    ghibliTreeFolder.add(params, 'ghibliTreeMinHeight', 0.0, 40.0, 0.5).name('Elevation Min').onChange(v => {
+        if (typeof window.respawnGhibliTrees === 'function') window.respawnGhibliTrees();
+        const t = _bgTrees();
+        if (t) { t.minElevation = v; t.respawn(); }
+    });
+    ghibliTreeFolder.add(params, 'ghibliTreeMaxHeight', 25.0, 120.0, 1.0).name('Elevation Max').onChange(v => {
+        if (typeof window.respawnGhibliTrees === 'function') window.respawnGhibliTrees();
+        const t = _bgTrees();
+        if (t) { t.maxElevation = v; t.respawn(); }
+    });
+    ghibliTreeFolder.add(params, 'ghibliTreeWindSway', 0.0, 3.0, 0.1).name('Wind Sway').onChange(v => {
+        if (typeof treeUniforms !== 'undefined' && treeUniforms && treeUniforms.uTreeScale) {
+            treeUniforms.uTreeScale.value = 1.5 * v;
+        }
+        const t = _bgTrees();
+        if (t) t.uWindStrength.value = v;
+    });
+    ghibliTreeFolder.add({ respawn: () => {
+        if (typeof window.respawnGhibliTrees === 'function') window.respawnGhibliTrees();
+        if (window.ghibliTrees) window.ghibliTrees.respawn();
+    }}, 'respawn').name('Respawn Trees');
+
+    // ---- Background Tree Atlas (the three Ghibli card trees) ----
+    // Separate subfolder so these do not collide with the legacy pine controls above.
+    const bgTreeParams = {
+        visible: true,
+        density: 1.0,
+        scale: 1.0,
+        elevMin: 6.8,
+        elevMax: 58.0,
+        maxSlope: 0.55,
+        wind: 1.0,
+        atlasMix: 0.75,
+        tintSpread: 0.18,
+        canopyShadow: '#2c5233',
+        canopyLit: '#6aa34a',
+        canopyTip: '#9ec96a',
+        trunkBase: '#3d2b1c',
+        trunkTop: '#6b4c33',
+        counts: '—'
+    };
+    const bgTreeFolder = ghibliTreeFolder.addFolder('Background Tree Atlas');
+    const _tsys = () => window.ghibliTrees;
+    const _respawnBg = () => { if (_tsys()) _tsys().respawn(); };
+
+    // Scale / Density / Elevation / Wind live on the PARENT folder and drive both tree
+    // systems. Only atlas-specific controls belong here, so there is exactly one slider
+    // per concept.
+    bgTreeFolder.add(bgTreeParams, 'visible').name('Visible').onChange(v => { if (_tsys()) _tsys().setVisible(v); });
+    bgTreeFolder.add(bgTreeParams, 'maxSlope', 0.1, 2.0, 0.05).name('Max Slope').onChange(v => { if (_tsys()) { _tsys().maxSlope = v; _respawnBg(); } });
+    bgTreeFolder.add(bgTreeParams, 'atlasMix', 0.0, 1.0, 0.05).name('Texture vs Palette').onChange(v => { if (_tsys()) _tsys().uAtlasMix.value = v; });
+    bgTreeFolder.add(bgTreeParams, 'tintSpread', 0.0, 0.6, 0.02).name('Per-Tree Variation').onChange(v => { if (_tsys()) _tsys().uTintSpread.value = v; });
+
+    const bgColorFolder = bgTreeFolder.addFolder('Colors');
+    bgColorFolder.addColor(bgTreeParams, 'canopyShadow').name('Canopy Shadow').onChange(v => { if (_tsys()) _tsys().setColor('canopyShadow', v); });
+    bgColorFolder.addColor(bgTreeParams, 'canopyLit').name('Canopy Lit').onChange(v => { if (_tsys()) _tsys().setColor('canopyLit', v); });
+    bgColorFolder.addColor(bgTreeParams, 'canopyTip').name('Canopy Tip').onChange(v => { if (_tsys()) _tsys().setColor('canopyTip', v); });
+    bgColorFolder.addColor(bgTreeParams, 'trunkBase').name('Trunk Base').onChange(v => { if (_tsys()) _tsys().setColor('trunkBase', v); });
+    bgColorFolder.addColor(bgTreeParams, 'trunkTop').name('Trunk Top').onChange(v => { if (_tsys()) _tsys().setColor('trunkTop', v); });
+
+    // Live instance readout, for tuning density against the frame budget
+    const bgCountCtrl = bgTreeFolder.add(bgTreeParams, 'counts').name('Instances (N/M/F)').disable();
+    setInterval(() => {
+        const t = _tsys();
+        if (!t || !bgCountCtrl) return;
+        const c = t.lastCounts;
+        bgTreeParams.counts = `${c.near} / ${c.mid} / ${c.far}`;
+        bgCountCtrl.updateDisplay();
+    }, 700);
+
+    function setGodMode(enabled) {
+        const target = typeof enabled === 'boolean' ? enabled : !isGodMode;
+        if (isGodMode === target) return;
+        isGodMode = target;
+        params.godMode = isGodMode;
+
+        if (isGodMode) {
+            if (typeof params !== 'undefined') {
+                params.groundFog = false;
+                params.godRays = false;
+                if (typeof isWindTrailsOn !== 'undefined') params.trails = false;
+                params.wind = false;
+                params.rain = false;
+                params.sceneFog = false;
+                params.showClouds = false;
+            }
+            // Automatically hide ALL cloud layers in God Mode
+            if (typeof instClouds !== 'undefined') instClouds.visible = false;
+            if (typeof instHighClouds !== 'undefined') instHighClouds.visible = false;
+            if (typeof instWispyClouds !== 'undefined') instWispyClouds.visible = false;
+            if (typeof instMegaClouds !== 'undefined') instMegaClouds.visible = false;
+            if (typeof toonCloudMat !== 'undefined' && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) toonCloudMat.uniforms.uEnableClouds.value = 0.0;
+
+            if (typeof scene !== 'undefined' && scene.fog) { scene.fog.near = 100000; scene.fog.far = 200000; }
+            if (typeof groundFog !== 'undefined') groundFog.visible = false;
+            if (typeof godRaysGroup !== 'undefined') godRaysGroup.visible = false;
+            if (typeof windTrailsGroup !== 'undefined') windTrailsGroup.visible = false;
+            
+            if (typeof debugFolder !== 'undefined') debugFolder.open();
+            if (typeof envFolder !== 'undefined') envFolder.open();
+            isFlightPaused = true;
+            const pauseToggle = document.getElementById('pause-toggle');
+            if (pauseToggle) pauseToggle.innerText = '▶';
+
+            if (!godCamera) {
+                const gm = setupGodMode(scene, cameraBase, renderer, playerGrp);
+                godCamera = gm.godCamera;
+                godControls = gm.godControls;
+            }
+            const curWaterY = (animeWaterSystem && animeWaterSystem.waterLevel !== undefined) ? animeWaterSystem.waterLevel : 2.4;
+            toggleGodMode(isGodMode, godCamera, camera, godControls, playerGrp, (cam) => {
+                if (typeof scenePass !== 'undefined' && scenePass) scenePass.camera = cam;
+            }, curWaterY);
+        } else {
+            if (typeof params !== 'undefined') {
+                params.showClouds = true;
+            }
+            if (typeof instClouds !== 'undefined') instClouds.visible = true;
+            if (typeof instHighClouds !== 'undefined') instHighClouds.visible = true;
+            if (typeof instWispyClouds !== 'undefined') instWispyClouds.visible = true;
+            if (typeof instMegaClouds !== 'undefined') instMegaClouds.visible = true;
+            if (typeof toonCloudMat !== 'undefined' && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) toonCloudMat.uniforms.uEnableClouds.value = 1.0;
+
+            const curWaterY = (animeWaterSystem && animeWaterSystem.waterLevel !== undefined) ? animeWaterSystem.waterLevel : 2.4;
+            toggleGodMode(isGodMode, godCamera, camera, godControls, playerGrp, (cam) => {
+                if (typeof scenePass !== 'undefined' && scenePass) scenePass.camera = cam;
+            }, curWaterY);
+        }
+
+        const btn = document.getElementById('god-mode-btn');
+        if (btn) {
+            btn.innerText = '▲';
+            btn.style.color = isGodMode ? '#ff4444' : 'rgba(255, 255, 255, 0.95)';
+            btn.style.textShadow = isGodMode ? '0 0 10px rgba(255, 68, 68, 0.9), 0 1px 3px rgba(0, 0, 0, 0.5)' : '0 1px 3px rgba(0, 0, 0, 0.35), 0 0 8px rgba(0, 0, 0, 0.2)';
+            btn.style.transform = isGodMode ? 'scale(1.15)' : 'scale(1.0)';
+            btn.title = isGodMode ? 'God Mode: ON (Free Camera Active) [G]' : 'Toggle God Mode (Free Camera) [G]';
+        }
+
+        if (typeof gui !== 'undefined' && gui) {
+            gui.controllersRecursive().forEach(c => {
+                if (c.property === 'godMode') c.updateDisplay();
+            });
+        }
+    }
+    window.setGodMode = setGodMode;
+
+    function setAllFogEnabled(enabled) {
+        params.showFog = enabled;
+        params.sceneFog = enabled;
+        if (!enabled) {
+            if (typeof scene !== 'undefined' && scene.fog) {
+                scene.fog.near = 100000;
+                scene.fog.far = 200000;
+            }
+            if (typeof window.fogGroup !== 'undefined') {
+                window.fogGroup.visible = false;
+            }
+            if (typeof groundFog !== 'undefined') {
+                groundFog.visible = false;
+            }
+        } else {
+            if (typeof scene !== 'undefined' && scene.fog && typeof playerGrp !== 'undefined' && playerGrp.position) {
+                const dynamicFar = (800 + Math.max(0, playerGrp.position.y - 300.0) * 2.2) / (params.fogIntensity || 3.5);
+                const dynamicNear = (10 + Math.max(0, playerGrp.position.y - 300.0) * 0.4) / (params.fogIntensity || 3.5);
+                scene.fog.near = dynamicNear;
+                scene.fog.far = dynamicFar;
+            }
+            if (typeof window.fogGroup !== 'undefined') {
+                window.fogGroup.visible = params.showFogPlanes;
+            }
+        }
+
+        if (typeof gui !== 'undefined' && gui) {
+            gui.controllersRecursive().forEach(c => {
+                if (c.property === 'sceneFog' || c.property === 'showFog') {
+                    c.updateDisplay();
+                }
+            });
+        }
+    }
+    window.setAllFogEnabled = setAllFogEnabled;
+
+    const debugFolder = gui.addFolder('Debug Render');
+    debugFolder.add(params, 'godMode').name('God Mode (Free Cam) [G]').listen().onChange(v => setGodMode(v));
     debugFolder.add(params, 'showProceduralSky').name('Procedural Sky').onChange(v => {
         if (typeof window.setSkyRenderMode === 'function') {
             if (!v) {
@@ -928,7 +1209,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
 
     debugFolder.add(params, 'showTerrain').name('Terrain').onChange(v => { terrain.visible = v; });
 
-    debugFolder.add(params, 'showWater').name('🌊 Ocean Visible').onChange(v => {
+    debugFolder.add(params, 'showWater').name('Ocean Visible').onChange(v => {
         if (animeWaterSystem) animeWaterSystem.setVisible(v);
     });
 
@@ -946,11 +1227,12 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         }
         instMesh.instanceMatrix.needsUpdate = true;
     }
+    debugFolder.add(params, 'showFog').name('All Fog').listen().onChange(v => setAllFogEnabled(v));
+    debugFolder.add(params, 'showFogPlanes').name('Fog Planes').listen().onChange(v => { if(typeof window.fogGroup !== 'undefined') window.fogGroup.visible = v; });
     debugFolder.add(params, 'showBirds').name('Birds').onChange(v => { if(typeof instBirds !== 'undefined') instBirds.visible = v; if(typeof flockGrp !== 'undefined') flockGrp.visible = v; });
-    debugFolder.add(params, 'showFogPlanes').name('Fog Planes').onChange(v => { if(typeof window.fogGroup !== 'undefined') window.fogGroup.visible = v; });
     debugFolder.add(params, 'showCrystals').name('Crystals').onChange(v => { instCrystals.visible = v; });
 
-    const shadingFolder = debugFolder.addFolder('🎨 Shade Mode');
+    const shadingFolder = debugFolder.addFolder('Shade Mode');
     shadingFolder.add(params, 'shadeMode', ['original', 'cel', 'flat'])
         .name('Mode (1/2/3)')
         .onChange(v => toonShaderManager.apply(scene, v));
@@ -958,7 +1240,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     debugFolder.add(params, 'showMap').name('World Map').onChange(v => { const el = document.getElementById('world-map'); if(el) el.style.display = v ? 'block' : 'none'; });
 
     // Bird & Flock Settings
-    const birdFolder = debugFolder.addFolder('🐦 Bird & Flock Settings');
+    const birdFolder = debugFolder.addFolder('Bird & Flock Settings');
     params.birdCount = LOW_GFX ? 12 : 40;
     params.birdScale = 0.42;
     params.birdColor = '#d6e5f5';
@@ -1025,9 +1307,16 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     function toggleGUI(show) {
         const guiEl = document.querySelector('.lil-gui.root') || (gui && gui.domElement);
         if (!guiEl) return;
-        const isCurrentlyHidden = guiEl.style.display === 'none' || (typeof window !== 'undefined' && window.getComputedStyle(guiEl).display === 'none');
+        const isCurrentlyHidden = guiEl.style.display === 'none' || guiEl.classList.contains('closed') || (typeof window !== 'undefined' && window.getComputedStyle(guiEl).display === 'none');
         const isVisible = typeof show === 'boolean' ? show : isCurrentlyHidden;
-        guiEl.style.display = isVisible ? 'block' : 'none';
+        if (isVisible) {
+            gui.open();
+            guiEl.style.display = '';
+            guiEl.classList.remove('closed');
+        } else {
+            gui.close();
+            guiEl.style.display = 'none';
+        }
         params.showGUI = isVisible;
         
         const cogBtn = document.getElementById('gui-toggle-btn');
@@ -1036,9 +1325,18 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             cogBtn.style.transform = isVisible ? 'rotate(45deg)' : 'none';
         }
     }
-    debugFolder.add(params, 'showGUI').name('lil-gui Panel').onChange(v => toggleGUI(v));
-    debugFolder.add(params, 'godRays').name('☀️ God Rays').onChange(v => { godRaysPass.enabled = v; });
-    debugFolder.add(params, 'godRayIntensity', 0, 2, 0.05).name('☀️ Ray Intensity').onChange(v => { godRaysPass.uniforms.uIntensity.value = v; });
+
+    if (gui && typeof gui.onOpenClose === 'function') {
+        gui.onOpenClose((changedGui) => {
+            if (changedGui === gui && gui._closed) {
+                toggleGUI(false);
+            }
+        });
+    }
+
+    debugFolder.add(params, 'showGUI').name('Settings Panel').onChange(v => toggleGUI(v));
+    debugFolder.add(params, 'godRays').name('God Rays').onChange(v => { godRaysPass.enabled = v; });
+    debugFolder.add(params, 'godRayIntensity', 0, 2, 0.05).name('Ray Intensity').onChange(v => { godRaysPass.uniforms.uIntensity.value = v; });
 
     const guiToggleBtn = document.getElementById('gui-toggle-btn');
     if (guiToggleBtn) {
@@ -1065,8 +1363,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             else openOceanInGui();
         }
         if ((e.key === 'g' || e.key === 'G') && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
-            const godBtn = document.getElementById('god-mode-btn');
-            if (godBtn) godBtn.click();
+            setGodMode();
         }
     });
 
@@ -1161,19 +1458,19 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         });
     }
 
-    if (drawerGodBtn && normalGodBtn) {
+    if (drawerGodBtn) {
         setTimeout(() => {
             const isGod = isGodMode;
-            drawerGodBtn.innerText = isGod ? '👁️ God Mode: ON' : '👁️ God Mode: OFF';
+            drawerGodBtn.innerText = isGod ? 'God Mode: ON' : 'God Mode: OFF';
             drawerGodBtn.style.color = isGod ? '#ff4444' : '#ffaa00';
         }, 1000);
 
         drawerGodBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            normalGodBtn.click();
+            setGodMode();
             setTimeout(() => {
                 const isGod = isGodMode;
-                drawerGodBtn.innerText = isGod ? '👁️ God Mode: ON' : '👁️ God Mode: OFF';
+                drawerGodBtn.innerText = isGod ? 'God Mode: ON' : 'God Mode: OFF';
                 drawerGodBtn.style.color = isGod ? '#ff4444' : '#ffaa00';
             }, 50);
         });
@@ -1186,72 +1483,11 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         document.getElementById('pause-toggle').innerText = isFlightPaused ? '▶' : '⏸';
     });
 
-    document.getElementById('god-mode-btn').addEventListener('click', () => {
-        isGodMode = !isGodMode;
-        const btn = document.getElementById('god-mode-btn');
-        if (isGodMode) {
-            if (typeof params !== 'undefined') {
-                params.groundFog = false;
-                params.godRays = false;
-                if (typeof isWindTrailsOn !== 'undefined') params.trails = false;
-                params.wind = false;
-                params.rain = false;
-                params.sceneFog = false;
-                params.showClouds = false;
-            }
-            // Automatically hide ALL cloud layers in God Mode
-            if (typeof instClouds !== 'undefined') instClouds.visible = false;
-            if (typeof instHighClouds !== 'undefined') instHighClouds.visible = false;
-            if (typeof instWispyClouds !== 'undefined') instWispyClouds.visible = false;
-            if (typeof instMegaClouds !== 'undefined') instMegaClouds.visible = false;
-            if (typeof toonCloudMat !== 'undefined' && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) toonCloudMat.uniforms.uEnableClouds.value = 0.0;
-
-            if (typeof scene !== 'undefined' && scene.fog) { scene.fog.near = 100000; scene.fog.far = 200000; }
-            if (typeof groundFog !== 'undefined') groundFog.visible = false;
-            if (typeof godRaysGroup !== 'undefined') godRaysGroup.visible = false;
-            if (typeof windTrailsGroup !== 'undefined') windTrailsGroup.visible = false;
-            
-            if (typeof debugFolder !== 'undefined') debugFolder.open();
-            if (typeof envFolder !== 'undefined') envFolder.open();
-            isFlightPaused = true;
-            document.getElementById('pause-toggle').innerText = '▶';
-            btn.innerText = '▲';
-            btn.style.color = '#ff4444';
-            btn.style.textShadow = '0 0 10px rgba(255, 68, 68, 0.9), 0 1px 3px rgba(0, 0, 0, 0.5)';
-            btn.style.transform = 'scale(1.15)';
-            btn.title = 'God Mode: ON (Free Camera Active) [G]';
-
-            if (!godCamera) {
-                const gm = setupGodMode(scene, cameraBase, renderer, playerGrp);
-                godCamera = gm.godCamera;
-                godControls = gm.godControls;
-            }
-            toggleGodMode(isGodMode, godCamera, camera, godControls, playerGrp, (cam) => {
-                if (typeof scenePass !== 'undefined' && scenePass) scenePass.camera = cam;
-            });
-    
-        } else {
-            if (typeof params !== 'undefined') {
-                params.showClouds = true;
-            }
-            if (typeof instClouds !== 'undefined') instClouds.visible = true;
-            if (typeof instHighClouds !== 'undefined') instHighClouds.visible = true;
-            if (typeof instWispyClouds !== 'undefined') instWispyClouds.visible = true;
-            if (typeof instMegaClouds !== 'undefined') instMegaClouds.visible = true;
-            if (typeof toonCloudMat !== 'undefined' && toonCloudMat.uniforms && toonCloudMat.uniforms.uEnableClouds) toonCloudMat.uniforms.uEnableClouds.value = 1.0;
-
-            btn.innerText = '▲';
-            btn.style.color = 'rgba(255, 255, 255, 0.95)';
-            btn.style.textShadow = '0 1px 3px rgba(0, 0, 0, 0.35), 0 0 8px rgba(0, 0, 0, 0.2)';
-            btn.style.transform = 'scale(1.0)';
-            btn.title = 'Toggle God Mode (Free Camera) [G]';
-
-            toggleGodMode(isGodMode, godCamera, camera, godControls, playerGrp, (cam) => {
-                if (typeof scenePass !== 'undefined' && scenePass) scenePass.camera = cam;
-            });
-    
-        }
-    });
+    if (normalGodBtn) {
+        normalGodBtn.addEventListener('click', () => {
+            setGodMode();
+        });
+    }
 
 
 
@@ -1492,6 +1728,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         uPlayerPos: uniform(new THREE.Vector3(0, 0, 0)),
         uTreeScale: uniform(1.5)
     };
+    window.treeUniforms = treeUniforms;
     
     const matTree = createTreeMaterial(
         terrainUniforms.uTime,
@@ -1555,6 +1792,9 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         return mask;
     }
 
+    // Hoisted: this was allocated fresh inside the per-vertex loop, 16,641 times per rebuild.
+    const COLOR_FROST_PATH = new THREE.Color(0xd0edff);
+
     function updateTerrainGeometry(playerX, playerZ) {
         const stepThreshold = 150;
         if (Math.hypot(playerX - lastTerrainGridX, playerZ - lastTerrainGridZ) < stepThreshold) return;
@@ -1581,11 +1821,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             const worldX = pos.getX(i) + gridX;
             const worldZ = pos.getZ(i) + gridZ;
             const h = getWorldHeight(worldX, worldZ);
-            if (i === 0 && Math.random() < 0.05) console.log('Terrain H:', h, 'WorldX:', worldX, 'Colors:', tempColor);
             pos.setY(i, h);
-
-            getWorldColor(h, worldX, worldZ, tempColor);
-            colors.setXYZ(i, tempColor.r, tempColor.g, tempColor.b);
 
             // Fast analytical heightmap normals (avoids expensive computeVertexNormals triangle pass)
             const hL = getWorldHeight(worldX - 12, worldZ);
@@ -1595,8 +1831,11 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             tempVec1.set(hL - hR, 24.0, hD - hU).normalize();
             norm.setXYZ(i, tempVec1.x, tempVec1.y, tempVec1.z);
 
+            // Single colour evaluation. This used to run TWICE per vertex with the first
+            // result written to the buffer and then immediately overwritten — pure dead work
+            // across 16,641 vertices, every rebuild.
             getWorldColor(h, worldX, worldZ, tempColor);
-            
+
             // Add dirt / frost path
             const pathMask = getPathStrength(worldX, worldZ);
             const currentBiome = getBiomeAt(worldX, worldZ);
@@ -1611,7 +1850,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
 
             if (pathMask > 0 && h > 2.0 && h < 25.0) {
                 if (currentBiome && currentBiome.name && currentBiome.name.includes('North Pole')) {
-                    tempColor.lerp(new THREE.Color(0xd0edff), pathMask * 0.35);
+                    tempColor.lerp(COLOR_FROST_PATH, pathMask * 0.35);
                 } else if (!currentBiome || !currentBiome.name || (!currentBiome.name.includes('Crystal') && !currentBiome.name.includes('Ocean') && !currentBiome.name.includes('Desert') && !currentBiome.name.includes('Canyon'))) {
                     tempColor.lerp(colorPath, pathMask * 0.85);
                 }
@@ -1918,18 +2157,19 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     geoCloud.computeVertexNormals();
 
     // Meshes — 10 Distinct 3D Stylized Pine Tree Instanced Meshes
-    const PINE_CONFIGS = [
-        { key: 'pine_var1', name: 'Stylized Pine 1 (Tall Majestic)', path: 'assets/stylized_pine_var1.glb', count: 120, height: 22.0, fallbackGeo: geoTree1, clusterGroup: 0 },
-        { key: 'pine_var2', name: 'Stylized Pine 2 (Full Tiered)', path: 'assets/stylized_pine_var2.glb', count: 120, height: 22.0, fallbackGeo: geoTree2, clusterGroup: 0 },
-        { key: 'pine_var3', name: 'Stylized Pine 3 (Mountain)', path: 'assets/Pine/stylized_pine_var3.glb', count: 110, height: 21.0, fallbackGeo: geoTree3, clusterGroup: 0 },
-        { key: 'pine_var4', name: 'Stylized Pine 4 (Dense Alpine)', path: 'assets/Pine/stylized_pine_var4.glb', count: 110, height: 20.0, fallbackGeo: geoTree4, clusterGroup: 1 },
-        { key: 'pine_fast', name: 'Pine (Ultra Fast Classic)', path: 'assets/Pine_ultra_fast.glb', count: 90, height: 22.0, fallbackGeo: geoTree1, clusterGroup: 1 },
-        { key: 'pine_fast1', name: 'Pine Alt (Ultra Fast Spire)', path: 'assets/Pine_1_ultra_fast.glb', count: 80, height: 22.0, fallbackGeo: geoTree3, clusterGroup: 1 },
-        { key: 'pine_small1', name: 'Small Stylized Pine 1', path: 'assets/small_stylized_pine_var1.glb', count: 90, height: 15.0, fallbackGeo: geoTree2, clusterGroup: 2 },
-        { key: 'pine_small2', name: 'Small Stylized Pine 2 (Highland)', path: 'assets/Pine/small_stylized_pine_var2.glb', count: 90, height: 14.0, fallbackGeo: geoTree3, clusterGroup: 2 },
-        { key: 'pine_small3', name: 'Small Stylized Pine 3 (Dwarf)', path: 'assets/small_stylized_pine_var3.glb', count: 80, height: 12.0, fallbackGeo: geoTree1, clusterGroup: 2 },
-        { key: 'pine_sapling', name: 'Sapling Pine', path: 'assets/Pine/sapling_stylized_pine.glb', count: 80, height: 8.0, fallbackGeo: geoTree4, clusterGroup: 2 }
+    const GHIBLI_TREE_CONFIGS = [
+        { key: 'pine_ghibli_02', name: 'Pine Ghibli 02 (Majestic)', path: 'assets/Pines/Pine_Ghibli_02.glb', count: 120, height: 22.0, fallbackGeo: geoTree1, clusterGroup: 0 },
+        { key: 'pine_model_a2', name: 'Pine Model A (Tall)', path: 'assets/Pines/Pine model  A (2).glb', count: 120, height: 22.0, fallbackGeo: geoTree2, clusterGroup: 0 },
+        { key: 'pine_model_a3', name: 'Pine Model A (Dense)', path: 'assets/Pines/Pine model  A (3).glb', count: 110, height: 21.0, fallbackGeo: geoTree3, clusterGroup: 0 },
+        { key: 'pine_model_a4', name: 'Pine Model A (Highland)', path: 'assets/Pines/Pine model  A (4).glb', count: 110, height: 20.0, fallbackGeo: geoTree4, clusterGroup: 1 },
+        { key: 'pine_model_a5', name: 'Pine Model A (Spire)', path: 'assets/Pines/Pine model  A (5).glb', count: 90, height: 22.0, fallbackGeo: geoTree1, clusterGroup: 1 },
+        { key: 'pine_model_a6', name: 'Pine Model A (Tiered)', path: 'assets/Pines/Pine model  A (6).glb', count: 80, height: 22.0, fallbackGeo: geoTree3, clusterGroup: 1 },
+        { key: 'pine_model_a7', name: 'Pine Model A (Alpine)', path: 'assets/Pines/Pine model  A (7).glb', count: 90, height: 18.0, fallbackGeo: geoTree2, clusterGroup: 2 },
+        { key: 'pine_model_a8', name: 'Pine Model A (Small)', path: 'assets/Pines/Pine model  A (8).glb', count: 90, height: 14.0, fallbackGeo: geoTree3, clusterGroup: 2 },
+        { key: 'pine_model_b1', name: 'Pine Model B (Grove 1)', path: 'assets/Pines/Pine model B (1).glb', count: 80, height: 12.0, fallbackGeo: geoTree1, clusterGroup: 2 },
+        { key: 'pine_model_b2', name: 'Pine Model B (Grove 2)', path: 'assets/Pines/Pine model B (2).glb', count: 80, height: 10.0, fallbackGeo: geoTree4, clusterGroup: 2 }
     ];
+    const PINE_CONFIGS = GHIBLI_TREE_CONFIGS;
 
     const pineTreeMeshes = PINE_CONFIGS.map(cfg => {
         const mesh = new THREE.InstancedMesh(cfg.fallbackGeo, matTree, cfg.count);
@@ -1939,6 +2179,15 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         mesh.castShadow = false;
         mesh.receiveShadow = true;
         mesh.frustumCulled = false;
+        // Initialize all instances far below ground so spawn loop will recycle them
+        const initDummy = new THREE.Object3D();
+        initDummy.position.set(0, -1000, 0);
+        initDummy.scale.set(0, 0, 0);
+        initDummy.updateMatrix();
+        for (let i = 0; i < cfg.count; i++) {
+            mesh.setMatrixAt(i, initDummy.matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
         scene.add(mesh);
         return mesh;
     });
@@ -2305,6 +2554,129 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     const { mesh: proceduralSkyMesh, material: proceduralSkyMat, uniforms: skyUniforms } = createProceduralSky();
     window._skyDbg = skyUniforms;
     scene.add(proceduralSkyMesh);
+
+    // ==========================================
+    // MILKY WAY NIGHT SKY (photographic cubemap)
+    // Real full-sky Milky Way panorama, extracted from galactic-home. It overlays the
+    // procedural night dome and fades in ONLY at night. Its opacity is driven by
+    // skyUniforms.uNightFactor, which is exactly 0.0 at Day and Dusk, so the locked
+    // Golden Hour Dusk look is provably untouched (neutral value at dusk).
+    // ==========================================
+    const uMilkyWayOpacity = uniform(0.0);
+    const uMilkyWayBrightness = uniform(1.15);
+    let milkyWayMesh = null;
+    // Live-tunable so the look can be perfected from the GUI (Environment > Moonlight & Night
+    // > Milky Way Photo). Configured to produce a dramatic diagonal galactic arc across the night sky.
+    const milkyWayParams = {
+        brightness: 1.15,  // multiplies texture colour naturally
+        opacity: 1.0,      // max blend at full night
+        tiltX: -18,        // degrees — positions galactic core at optimal elevation
+        tiltY: 42,         // degrees — swings the core across the diagonal view
+        tiltZ: 42          // degrees — diagonal lean matching starry night photography
+    };
+    const applyMilkyWayTilt = () => {
+        if (!milkyWayMesh) return;
+        milkyWayMesh.rotation.set(
+            THREE.MathUtils.degToRad(milkyWayParams.tiltX),
+            THREE.MathUtils.degToRad(milkyWayParams.tiltY),
+            THREE.MathUtils.degToRad(milkyWayParams.tiltZ)
+        );
+    };
+    try {
+        // Equirectangular Milky Way panorama (built from the galactic-home cubemap). Using a
+        // single 2D texture on a sphere — the same proven setup as the procedural sky dome —
+        // instead of a samplerCube node, which dropped the WebGPU device on this renderer.
+        const mwTex = new THREE.TextureLoader().load('assets/skybox/milkyway_equirect.png');
+        mwTex.colorSpace = THREE.SRGBColorSpace;
+        mwTex.anisotropy = 4;
+
+        const mwMat = new MeshBasicNodeMaterial({
+            side: THREE.BackSide,
+            depthWrite: false,
+            transparent: true,
+            fog: false,
+            // Additive: the panorama's near-black sky adds nothing, so the procedural starfield
+            // underneath stays visible — we only ADD the Milky Way band/glow on top of it.
+            // depthTest=true (default) ensures it doesn't bleed through the water surface.
+            blending: THREE.AdditiveBlending
+        });
+        // Standard sphere UVs map the equirect panorama seamlessly.
+        const mwSample = texture(mwTex);
+        const mwRaw = mwSample.rgb.mul(mwSample.a);
+        mwMat.colorNode = mwRaw.mul(uMilkyWayBrightness);
+        mwMat.opacityNode = uMilkyWayOpacity;
+
+        const mwGeo = new THREE.SphereGeometry(16000, 64, 32);
+        milkyWayMesh = new THREE.Mesh(mwGeo, mwMat);
+        milkyWayMesh.renderOrder = -999; // just after the procedural dome (-1000), before terrain
+        milkyWayMesh.frustumCulled = false;
+        applyMilkyWayTilt();
+        scene.add(milkyWayMesh);
+    } catch (e) {
+        console.warn('[MilkyWay] failed to init sky panorama', e);
+    }
+    window._milkyWay = () => milkyWayMesh;
+
+    // ==========================================
+    // AURORA BOREALIS — animated curtain rings
+    // CylinderGeometry (open) + TSL overlapping sine waves + AdditiveBlending.
+    // Gated by uNightFactor so it never appears at Dusk or Day.
+    // ==========================================
+    const uAuroraOpacity = uniform(0.0);
+    const uAuroraIntensity = uniform(1.0);
+    const uAuroraTime = uniform(0.0);
+    let auroraMesh = null;
+    const auroraParams = {
+        opacity: 0.0,      // Off by default to keep starry night clean
+        intensity: 1.0,
+        speed: 1.0,
+        altitude: 2500,  // Y offset above camera
+    };
+
+    try {
+        const auroraMat = new MeshBasicNodeMaterial({
+            side: THREE.BackSide,
+            depthWrite: false,
+            transparent: true,
+            fog: false,
+            blending: THREE.AdditiveBlending
+        });
+
+        // Cylinder half-height = 2500, radius = 12000
+        const px = positionLocal.x.div(float(12000));
+        const pz = positionLocal.z.div(float(12000));
+        // Normalise Y: 0 at bottom of cylinder, 1 at top
+        const pyNorm = positionLocal.y.add(float(2500)).div(float(5000));
+
+        // Soft fade at top and bottom edges of the curtain
+        const vFade = tslSmoothstep(float(0.0), float(0.2), pyNorm)
+            .mul(tslSmoothstep(float(1.0), float(0.8), pyNorm));
+
+        const t = uAuroraTime.mul(float(0.4));
+        // Three overlapping sine waves — different frequencies & phase speeds create organic ribbons
+        const w1 = sin(px.mul(float(9.0)).add(t)).mul(float(0.5)).add(float(0.5));
+        const w2 = sin(pz.mul(float(7.0)).sub(t.mul(float(1.3)))).mul(float(0.5)).add(float(0.5));
+        const w3 = sin(px.mul(float(11.0)).add(pz.mul(float(8.0))).sub(t.mul(float(0.8)))).mul(float(0.5)).add(float(0.5));
+
+        // Multiply + power to get narrow bright ribbons with soft falloff
+        const ribbon = w1.mul(w2.mul(float(0.7)).add(float(0.3))).mul(w3).pow(float(2.0));
+
+        const cGreen = vec3(0.0, 1.0, 0.3);
+        const cBlue  = vec3(0.0, 0.4, 1.0);
+        const auroraColor = mix(cGreen, cBlue, w2).mul(ribbon).mul(vFade);
+
+        auroraMat.colorNode = auroraColor.mul(uAuroraIntensity);
+        auroraMat.opacityNode = uAuroraOpacity;
+
+        const auroraGeo = new THREE.CylinderGeometry(12000, 12000, 5000, 64, 1, true);
+        auroraMesh = new THREE.Mesh(auroraGeo, auroraMat);
+        auroraMesh.renderOrder = -998;
+        auroraMesh.frustumCulled = false;
+        scene.add(auroraMesh);
+    } catch (e) {
+        console.warn('[Aurora] failed to init', e);
+    }
+    window._aurora = () => auroraMesh;
 
     // SKY MODE. "flat" reproduces flight-merged (WebGL): the procedural dome is hidden and a solid
     // background colour carries the sky, which the dense fog fades geometry into. The dome is kept
@@ -2702,6 +3074,46 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         return getBiomeAt(worldX, worldZ).treesOk;
     }
 
+    let prevGhibliTreeScale = params.ghibliTreeScale || 1.2;
+    function updateGhibliTreeScale(newScale) {
+        if (!newScale || newScale <= 0) return;
+        const ratio = newScale / prevGhibliTreeScale;
+        prevGhibliTreeScale = newScale;
+        const dummyObj = new THREE.Object3D();
+        pineTreeMeshes.forEach(mesh => {
+            const count = mesh.maxCount || mesh.count;
+            let changed = false;
+            for (let i = 0; i < count; i++) {
+                mesh.getMatrixAt(i, dummyObj.matrix);
+                dummyObj.matrix.decompose(dummyObj.position, dummyObj.quaternion, dummyObj.scale);
+                if (dummyObj.position.y > -500) {
+                    dummyObj.scale.multiplyScalar(ratio);
+                    dummyObj.updateMatrix();
+                    mesh.setMatrixAt(i, dummyObj.matrix);
+                    changed = true;
+                }
+            }
+            if (changed) mesh.instanceMatrix.needsUpdate = true;
+        });
+    }
+    window.updateGhibliTreeScale = updateGhibliTreeScale;
+
+    function respawnGhibliTrees() {
+        treeGrid.clear();
+        const dummyObj = new THREE.Object3D();
+        dummyObj.position.set(0, -1000, 0);
+        dummyObj.scale.set(0, 0, 0);
+        dummyObj.updateMatrix();
+        pineTreeMeshes.forEach(mesh => {
+            const count = mesh.maxCount || mesh.count;
+            for (let i = 0; i < count; i++) {
+                mesh.setMatrixAt(i, dummyObj.matrix);
+            }
+            mesh.instanceMatrix.needsUpdate = true;
+        });
+    }
+    window.respawnGhibliTrees = respawnGhibliTrees;
+
     function updateInstances(playerX, playerZ, time, dt, playerYaw) {
         const dist = 850; 
         
@@ -2861,11 +3273,40 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             const focusX = isFreeCam ? (isGodMode ? godCamera.position.x : camera.position.x) : playerX;
             const focusZ = isFreeCam ? (isGodMode ? godCamera.position.z : camera.position.z) : playerZ;
             
+            // Ghibli biome trees: deterministic cell-hash placement, three LOD bands.
+            // Runs on the same focus point as the pines so editor/God-mode freecam works.
+            if (ghibliTrees && ghibliTrees.ready) {
+                ghibliTrees.update(focusX, focusZ);
+            }
+
+
             // STRICT 800-METER TREE RADIUS WITH SEAMLESS PROGRESSIVE LOD HANDOFF
             const activeTreeDist = 800;
             const dense3dRadius = 420; // 3D GLB trees spawn from 0m to 420m
             const billboardMinDist = 380; // Billboards spawn from 380m out to 800m (40m overlap ring)
             const billboardMaxDist = 800;
+            // Re-enable frustum culling on the recycled instanced meshes.
+            //
+            // These all had frustumCulled = false, so every instance was submitted every frame
+            // regardless of where the camera pointed -- ~970 pines plus jungle and palm parts
+            // vertex-shaded while facing the other way. The flag was off because the meshes are
+            // recycled around the player, which makes the geometry's own bounding sphere stale
+            // instantly. Setting an explicit sphere centred on the focus point fixes that
+            // properly: culling comes back and nothing pops, because the radius is padded well
+            // past the spawn radius rather than fitted tightly.
+            {
+                const cullRadius = dense3dRadius + 120;   // spawn radius + tallest tree + slack
+                const applyCullSphere = (m) => {
+                    if (!m) return;
+                    if (!m.boundingSphere) m.boundingSphere = new THREE.Sphere();
+                    m.boundingSphere.center.set(focusX, 40, focusZ);
+                    m.boundingSphere.radius = cullRadius;
+                    m.frustumCulled = true;
+                };
+                if (typeof treeMeshes !== 'undefined') treeMeshes.forEach(applyCullSphere);
+                if (window.instJungleTreeParts) window.instJungleTreeParts.forEach(applyCullSphere);
+                if (window.instPalmTreeParts) window.instPalmTreeParts.forEach(applyCullSphere);
+            }
 
             if (params.showTrees) {
                 const playerBiome = getBiomeAt(focusX, focusZ);
@@ -2921,15 +3362,32 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
                                         continue;
                                     }
 
+                                    // Tree density filter
+                                    const treeDensity = params.ghibliTreeDensity !== undefined ? params.ghibliTreeDensity : 1.0;
+                                    if (treeDensity < 1.0 && Math.random() > treeDensity) {
+                                        attempts++;
+                                        continue;
+                                    }
+
                                     h = getWorldHeight(nx, nz);
                                     pathVal = getPathStrength(nx, nz);
                                     const bObj = getBiomeAt(nx, nz);
                                     bName = bObj && bObj.name ? bObj.name : '';
 
+                                    let isGhibli = bName.includes('Ghibli Land');
                                     let isForest = true;
-                                    let biomeMatch = !bName.toLowerCase().includes('jungle') && !bName.includes('Crystal Land') && !bName.includes('Desert') && !bName.includes('Canyon') && !bName.includes('North Pole') && !bName.includes('Misty');
+                                    let biomeMatch = isGhibli || (!bName.toLowerCase().includes('jungle') && !bName.includes('Crystal Land') && !bName.includes('Desert') && !bName.includes('Canyon') && !bName.includes('North Pole') && !bName.includes('Misty'));
                                     let islandMaskOk = (getIslandData(nx, nz).mask >= 0.35);
-                                    let elevationValid = (h >= 6.8 && h <= 55.0) && islandMaskOk;
+
+                                    let minElev = params.ghibliTreeMinHeight !== undefined ? params.ghibliTreeMinHeight : 6.8;
+                                    let maxElev = params.ghibliTreeMaxHeight !== undefined ? params.ghibliTreeMaxHeight : 58.0;
+                                    let elevationValid = (h >= minElev && h <= maxElev) && islandMaskOk;
+
+                                    let minDist = params.ghibliTreeMinDist !== undefined ? params.ghibliTreeMinDist : 14.0;
+                                    if (treeDensity > 1.0) {
+                                        minDist = Math.max(6.0, minDist / Math.sqrt(treeDensity));
+                                    }
+                                    let minDistSq = minDist * minDist;
 
                                     if (isForest && elevationValid && pathVal < 0.20 && isTreeZone(nx, nz) && biomeMatch) {
                                         let cx = Math.floor(nx / TREE_CELL_SIZE);
@@ -2941,7 +3399,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
                                                 const ncz = (cz + dz + 32768) & 0xFFFF;
                                                 let neighbor = treeGrid.get((ncx << 16) | ncz);
                                                 if (neighbor) {
-                                                    if ((neighbor.x - nx)**2 + (neighbor.z - nz)**2 < 20) tooClose = true;
+                                                    if ((neighbor.x - nx)**2 + (neighbor.z - nz)**2 < minDistSq) tooClose = true;
                                                 }
                                             }
                                         }
@@ -2956,7 +3414,8 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
                                 treeGrid.set(getTreeCell(nx, nz), {x: nx, z: nz});
                                 dummy.position.set(nx, h, nz);
                                 dummy.rotation.set(0, Math.random() * Math.PI * 2.0, 0);
-                                let baseS = 0.90 + Math.random() * 0.40;
+                                const curScale = params.ghibliTreeScale !== undefined ? params.ghibliTreeScale : 1.2;
+                                let baseS = (0.90 + Math.random() * 0.40) * curScale;
                                 dummy.scale.set(baseS * (0.92 + Math.random() * 0.16), baseS * (0.94 + Math.random() * 0.12), baseS * (0.92 + Math.random() * 0.16));
                             } else {
                                 dummy.position.set(0, -1000, 0);
@@ -3225,6 +3684,32 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     const flightModelManager = new FlightModelManager(playerVisuals, gltfLoader, resolveAssetUrl);
     window.flightModelManager = flightModelManager;
 
+    // ==========================================
+    // GHIBLI BIOME TREES (procedural, instanced, LOD)
+    // ==========================================
+    const ghibliTrees = new GhibliTreeSystem({
+        scene,
+        gltfLoader,
+        resolveAssetUrl,
+        uTime: terrainUniforms.uTime,
+        gradientMap,
+        getWorldHeight,
+        getBiomeAt,
+        getIslandData,
+        getPathStrength,
+        densityScale: tierSettings.treeDensity
+    });
+    window.ghibliTrees = ghibliTrees;
+    ghibliTrees.load().then(ok => {
+        if (ok) {
+            console.info(`[Wanderlust] Ghibli trees ready — pools near/mid/far =`,
+                ghibliTrees.poolSizes, `(tier ${deviceTier})`);
+            ghibliTrees.respawn();
+        } else {
+            console.warn('[Wanderlust] Ghibli tree system failed to build geometry');
+        }
+    }).catch(err => console.error('[Wanderlust] Ghibli tree load failed:', err));
+
     let isModelVisible = true;
     let isSoundMuted = false;
     let isEngineSoundOn = true;
@@ -3243,13 +3728,29 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
                 biplaneAudio.setActive(false);
             }
         }
+        const topEngineBtn = document.getElementById('top-engine-btn');
+        if (topEngineBtn) {
+            topEngineBtn.style.display = isPlane ? 'inline-flex' : 'none';
+        }
         const charBtn = document.getElementById('char-toggle');
         if (charBtn) {
             charBtn.innerText = `MODEL: ${cfg.name.toUpperCase()}`;
         }
-        if (typeof flightModelDropdownController !== 'undefined' && flightModelDropdownController) {
-            flightModelDropdownController.setValue(cfg.id);
+        const topModelSelect = document.getElementById('top-model-select');
+        if (topModelSelect && topModelSelect.value !== cfg.id) {
+            topModelSelect.value = cfg.id;
         }
+        if (typeof flightModelDropdownController !== 'undefined' && flightModelDropdownController) {
+            if (flightModelDropdownController.getValue() !== cfg.id) {
+                flightModelDropdownController.setValue(cfg.id);
+            }
+        }
+    }
+
+    // Initialize initial state for engine button based on starting model
+    const initCfg = flightModelManager.getCurrentConfig();
+    if (initCfg) {
+        onFlightModelChanged(initCfg);
     }
 
     window.addEventListener('flight-model-changed', (e) => {
@@ -3292,6 +3793,12 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             } else {
                 biplaneAudio.setActive(false);
             }
+        }
+        const topEngineBtn = document.getElementById('top-engine-btn');
+        if (topEngineBtn) {
+            topEngineBtn.style.opacity = isEngineSoundOn ? '1' : '0.45';
+            topEngineBtn.style.color = isEngineSoundOn ? '#4ade80' : 'rgba(255, 255, 255, 0.6)';
+            topEngineBtn.title = isEngineSoundOn ? 'Engine Sound: ON (Click to Mute)' : 'Engine Sound: OFF (Click to Enable)';
         }
         const engineBtn = document.getElementById('engine-sound-btn');
         if (engineBtn) {
@@ -3338,6 +3845,58 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     document.getElementById('engine-sound-toggle')?.addEventListener('click', () => {
         setEngineSoundEnabled(!isEngineSoundOn);
     });
+
+    document.getElementById('top-engine-btn')?.addEventListener('click', () => {
+        setEngineSoundEnabled(!isEngineSoundOn);
+    });
+
+    document.getElementById('top-music-btn')?.addEventListener('click', () => {
+        document.getElementById('music-toggle')?.click();
+    });
+
+    // Top Bar Model Switcher UI Initialization
+    const topModelSelect = document.getElementById('top-model-select');
+    const topModelPrev = document.getElementById('top-model-prev-btn');
+    const topModelNext = document.getElementById('top-model-next-btn');
+
+    if (topModelSelect) {
+        topModelSelect.innerHTML = '';
+        FLIGHT_MODELS.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.name;
+            topModelSelect.appendChild(opt);
+        });
+
+        if (initCfg) {
+            topModelSelect.value = initCfg.id;
+        }
+
+        topModelSelect.addEventListener('change', (e) => {
+            const id = e.target.value;
+            if (typeof flightModelManager !== 'undefined' && flightModelManager) {
+                flightModelManager.setModelById(id);
+            }
+        });
+    }
+
+    if (topModelPrev) {
+        topModelPrev.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (typeof flightModelManager !== 'undefined' && flightModelManager) {
+                flightModelManager.prevModel();
+            }
+        });
+    }
+
+    if (topModelNext) {
+        topModelNext.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (typeof flightModelManager !== 'undefined' && flightModelManager) {
+                flightModelManager.nextModel();
+            }
+        });
+    }
 
     window.updateCustomModelTransform = function(model) {
         if (!model) return;
@@ -3571,10 +4130,8 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     });
 
     // ==========================================
-    // GLB Pine Tree Loader — Merged Single Draw Call
+    // GLB Tree Loader — Ghibli Atlas & Instancing
     // ==========================================
-    // Merges Bark + Leaves primitives into ONE geometry with vertex colors.
-    // 1 InstancedMesh = 1 draw call per tree slot (not 2).
 
     function applyGLBPineTree(gltf, targetInstancedMeshes, targetHeight) {
         gltf.scene.updateMatrixWorld(true);
@@ -3588,6 +4145,40 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         const modelHeight = bbox.max.y - bbox.min.y;
         const sc = modelHeight > 0 ? (targetHeight / modelHeight) : 1.0;
         const offsetY = -bbox.min.y;
+
+        // Check if there is an atlas map on the GLTF mesh
+        let atlasMap = null;
+        for (let i = 0; i < childMeshes.length; i++) {
+            const m = childMeshes[i];
+            if (m.material) {
+                if (m.material.map) {
+                    atlasMap = m.material.map;
+                    break;
+                } else if (Array.isArray(m.material) && m.material[0] && m.material[0].map) {
+                    atlasMap = m.material[0].map;
+                    break;
+                }
+            }
+        }
+
+        let customTreeMat = matTree;
+        if (atlasMap) {
+            atlasMap.colorSpace = THREE.SRGBColorSpace;
+            customTreeMat = new MeshToonNodeMaterial({
+                color: new THREE.Color(0xffffff),
+                map: atlasMap,
+                gradientMap: gradientMap,
+                alphaTest: 0.35,
+                side: THREE.DoubleSide,
+                transparent: false,
+                depthWrite: true,
+                depthTest: true,
+                dithering: true
+            });
+            if (typeof windSwayNode === 'function') {
+                customTreeMat.positionNode = windSwayNode(terrainUniforms.uTime, treeUniforms.uTreeScale);
+            }
+        }
 
         targetInstancedMeshes.forEach((instMesh) => {
             const geos = [];
@@ -3648,21 +4239,21 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             mergedGeom.computeBoundingSphere();
 
             instMesh.geometry = mergedGeom;
-            instMesh.material = matTree;
+            instMesh.material = customTreeMat;
             instMesh.instanceColor = null;
             instMesh.instanceMatrix.needsUpdate = true;
         });
     }
 
-    // Asynchronously load ALL 10 GLTF Pine tree assets into their respective instanced meshes
+    // Asynchronously load ALL 10 GLTF Ghibli tree assets into their respective instanced meshes
     PINE_CONFIGS.forEach((cfg, idx) => {
         const instMesh = pineTreeMeshes[idx];
         const fullUrl = resolveAssetUrl(cfg.path);
         gltfLoader.load(fullUrl, (gltf) => {
             applyGLBPineTree(gltf, [instMesh], cfg.height);
-            console.log('✓ Successfully loaded and applied pine model:', cfg.name, fullUrl);
+            console.log('Successfully loaded and applied Ghibli tree model:', cfg.name, fullUrl);
         }, undefined, (err) => {
-            console.error('Failed to load pine model:', fullUrl, err);
+            console.error('Failed to load Ghibli tree model:', fullUrl, err);
         });
     });
 
@@ -4076,51 +4667,12 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     let velocity = 15.0; 
     let pitch = 0, yaw = 0, roll = 0;
     const BASE_FOV = 60;
-    // --- Low-Poly Particle Starfield ---
-    const starCount = LOW_GFX ? 2000 : 8000;
-    const starGeometry = new THREE.BufferGeometry();
-    const starPositions = new Float32Array(starCount * 3);
-    const starPulse = new Float32Array(starCount);
-
-    for (let i = 0; i < starCount * 3; i += 3) {
-        // Distribute randomly in a sphere well within camera.far (3000)
-        const radius = 2500;
-        const u = Math.random();
-        // Restrict v to [0.5, 1.0] to only generate stars in the upper hemisphere
-        const v = Math.random() * 0.5 + 0.5;
-        const theta = u * 2.0 * Math.PI;
-        const phi = Math.acos(2.0 * v - 1.0);
-        
-        const y = radius * Math.cos(phi);
-        const x = radius * Math.sin(phi) * Math.cos(theta);
-        const z = radius * Math.sin(phi) * Math.sin(theta);
-
-        starPositions[i] = x;
-        starPositions[i + 1] = y;
-        starPositions[i + 2] = z;
-        
-        // Make 10% of stars pulse
-        starPulse[i / 3] = Math.random() < 0.1 ? 1.0 : 0.0;
-    }
-
-    starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
-    starGeometry.setAttribute('pulse', new THREE.BufferAttribute(starPulse, 1));
-    const starMaterial = new PointsNodeMaterial({
-        color: 0xffffff,
-        size: 2.5,
-        sizeAttenuation: false,
-        fog: false,
-        transparent: true,
-        opacity: 0.0
-    });
-    
-    const starField = new THREE.Points(starGeometry, starMaterial);
-    starField.renderOrder = -3;
-    starField.visible = false;
-    scene.add(starField);
+    // (Removed) Low-poly particle star field: 8,000 THREE.Points that were built, added to
+    // the scene, then force-hidden every single frame. Stars now come from the procedural
+    // sky shader instead — see starLayer() in src/shaders/atmosphere/proceduralSky.js.
 
     // --- Camera Rig Hierarchy ---
-    const cameraBase = new THREE.Group(); 
+    cameraBase = new THREE.Group(); 
     scene.add(cameraBase);
 
     const cameraPivot = new THREE.Group(); 
@@ -4189,10 +4741,13 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     let timePhase = (localStorage.getItem('wl_timePhase') !== null) ? parseInt(localStorage.getItem('wl_timePhase')) : 1; // Default to 1: Dusk
 
     let envConfigs = [
-        {name: 'Day', bg: 0x4a90d9, mid: 0x7ab4e6, fog: 0xc8dce8, amb: 0xdcf2ff, dir: 0xfffaeb, ambI: 1.2, dirI: 2.4, starOp: 0, sunY: 10000, moonY: -8000, glintCol: 0xfff0d0, cloudCol: 0xfffaec}, // Day / Morning
+        {name: 'Day', bg: 0x3f7fc4, mid: 0x74add9, fog: 0xbcd2e2, amb: 0xcfe6f7, dir: 0xfff3d8, ambI: 0.75, dirI: 1.60, starOp: 0, sunY: 10000, moonY: -8000, glintCol: 0xfff0d0, cloudCol: 0xfdf7e8}, // Day / Morning — light energy cut from 3.6 to 2.35 and hue pulled off pure white; near-white light at high intensity pushed R,G,B over the soft-clip knee together, which is what flattened the frame to haze
         {name: 'Dusk', bg: 0x2a5090, mid: 0xc85078, fog: 0xffa07a, amb: 0xffdab9, dir: 0xffaa00, ambI: 1.1, dirI: 3.2, starOp: 0, sunY: 160, moonY: 200, glintCol: 0xffaa00, cloudCol: 0xfffaec}, // Dusk — deep blue zenith, magenta/peach mid, warm orange horizon+fog
-        {name: 'Twilight', bg: 0x040816, mid: 0x0f1d3a, fog: 0x16284d, amb: 0x556688, dir: 0x88bbff, ambI: 0.8, dirI: 1.8, starOp: 1.0, sunY: -8000, moonY: 9000, glintCol: 0x66aaff, cloudCol: 0x223355}, // Twilight / Night (Bright Moonlight & Warm Kiki Glow)
+        {name: 'Twilight', bg: 0x0a1330, mid: 0x1b2f5c, fog: 0x24406e, amb: 0x6b82ad, dir: 0x9ecbff, ambI: 1.05, dirI: 2.2, starOp: 1.0, sunY: -8000, moonY: 9000, glintCol: 0x8cc4ff, cloudCol: 0x33507d}, // Twilight / Night — moonlight lifted so terrain is readable; sky no longer collapses to a flat 2% dome
     ];
+    // Exposure defaults live on `params` (dayExposure / nightExposure) so the sliders drive
+    // them live. Dusk deliberately has NO slider and is hard-pinned to 1.0 below.
+
     let currentSunY = envConfigs[timePhase] ? envConfigs[timePhase].sunY : 160;
     let currentMoonY = envConfigs[timePhase] ? envConfigs[timePhase].moonY : 200;
     let currentFps = 60;
@@ -4222,15 +4777,12 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             cameraManager = new CameraManager(camera, cameraBase, cameraZoomDist);
         }
         lastAnimTime = nowAnimTime;
+        adaptiveRes.sample(rawDt * 1000);
         if (rawDt > 0.1 || rawDt <= 0) rawDt = 0.0166;
         smoothedDt = smoothedDt * 0.7 + rawDt * 0.3;
         let dt = smoothedDt;
 
         const time = clock.getElapsedTime();
-
-        if (starMaterial.userData.shader) {
-            starMaterial.userData.shader.uniforms.time.value = time;
-        }
 
         if (animeWaterSystem && animeWaterSystem.visible) {
             const activeCam = isGodMode ? godCamera : camera;
@@ -4283,7 +4835,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             lastFpsTime = now;
             const fpsEl = document.getElementById('fps-counter');
             if (fpsEl) {
-                fpsEl.innerText = `FPS${currentFps}`;
+                fpsEl.innerText = `FPS ${currentFps}`;
             }
             const currZn = getBiomeAt(playerGrp.position.x, playerGrp.position.z);
             const biomeEl = document.getElementById('biome-label');
@@ -4294,6 +4846,19 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         // 3-Stage Lighting Engine Lerp
         const target = envConfigs[timePhase];
         const decayEnv = 1.0 - Math.exp(-2.0 * dt);
+
+        // Per-phase exposure. Index 1 (Dusk) is EXACTLY 1.0 — a multiply by one cannot change
+        // a pixel, so the golden dusk look is provably untouched by this whole system.
+        // Day and Night read live from the sliders; Dusk is hard-pinned to 1.0 and has no slider.
+        const targetExposure = timePhase === 0 ? params.dayExposure
+                             : timePhase === 2 ? params.nightExposure
+                             : 1.0;
+        const wantExposure = targetExposure * params.exposureTrim;
+        uPhaseExposure.value += (wantExposure - uPhaseExposure.value) * decayEnv;
+        // Snap once the lerp is within a rounding error. Without this, returning to dusk from
+        // another phase leaves the exposure at 0.9999... forever — visually identical, but the
+        // dusk guarantee is meant to be exact, not approximate.
+        if (Math.abs(wantExposure - uPhaseExposure.value) < 0.0005) uPhaseExposure.value = wantExposure;
         if (scene.background && scene.background.isColor) {
             scene.background.lerp(tempColorTarget.setHex(target.bg), decayEnv);
         }
@@ -4303,9 +4868,9 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         ambientLight.intensity += (target.ambI - ambientLight.intensity) * decayEnv;
         dirLight.color.lerp(tempColorTarget.setHex(target.dir), decayEnv);
         dirLight.intensity += (target.dirI - dirLight.intensity) * decayEnv;
-        // Hide old star field — procedural sky handles stars now
-        starMaterial.opacity = 0;
-        starField.visible = false;
+        // Old points-based star field removed — the procedural sky now genuinely draws stars.
+        // (It previously did not: the comment here claimed it did, but proceduralSky.js had no
+        // star code at all, which is why night had none.)
 
         // Player warm lantern lights modulation (magical lantern at Twilight, warm rim at Dusk, subtle at Day)
         const kikiGlow = (timePhase === 2) ? 2.5 : (timePhase === 1 ? 1.4 : 0.4);
@@ -4337,6 +4902,31 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             const targetDuskFactor = (timePhase === 1) ? 1.0 : 0.0;
             skyUniforms.uNightFactor.value += (targetNightFactor - skyUniforms.uNightFactor.value) * decayEnv;
             skyUniforms.uDuskFactor.value += (targetDuskFactor - skyUniforms.uDuskFactor.value) * decayEnv;
+
+            // Milky Way night skybox — fade in with night, keep centred on the camera.
+            // Driven off uNightFactor so it is fully invisible at Dusk (dusk look untouched).
+            if (milkyWayMesh) {
+                uMilkyWayOpacity.value = skyUniforms.uNightFactor.value * milkyWayParams.opacity;
+                uMilkyWayBrightness.value = milkyWayParams.brightness;
+                milkyWayMesh.visible = uMilkyWayOpacity.value > 0.01;
+                const activeCam = isGodMode ? godCamera : camera;
+                activeCam.getWorldPosition(tempVec1);
+                milkyWayMesh.position.copy(tempVec1);
+            }
+            if (auroraMesh) {
+                const nightF = skyUniforms.uNightFactor.value;
+                uAuroraTime.value += dt * auroraParams.speed;
+                uAuroraOpacity.value = nightF * auroraParams.opacity;
+                uAuroraIntensity.value = auroraParams.intensity;
+                const activeCam = isGodMode ? godCamera : camera;
+                activeCam.getWorldPosition(tempVec1);
+                auroraMesh.position.set(
+                    tempVec1.x,
+                    tempVec1.y + auroraParams.altitude,
+                    tempVec1.z
+                );
+                auroraMesh.visible = uAuroraOpacity.value > 0.01;
+            }
 
             // Compute distinct zenith, mid, and horizon colors based on time of day
             let targetZenithHex = (timePhase === 1) ? target.bg : ((timePhase === 2) ? target.bg : biomeTarget.skyZenith);
@@ -4489,15 +5079,17 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             right: keys.d || touchState.x > 0.1
         };
 
+        const curWaterY = (animeWaterSystem && animeWaterSystem.waterLevel !== undefined) ? animeWaterSystem.waterLevel : 2.4;
+
         if (isGodMode && godControls) {
-            updateGodMode(dt, keys, godControls, godCamera);
+            updateGodMode(dt, keys, godControls, godCamera, curWaterY);
         }
 
         if (playerPhysics) {
             playerPhysics.update(dt, inputState, isBraking, isBoosting, isFlightPaused, treeGrid);
             
             if (cameraManager) {
-                cameraManager.update(dt, playerGrp, playerPhysics.currentYaw, isBoosting);
+                cameraManager.update(dt, playerGrp, playerPhysics.currentYaw, isBoosting, curWaterY);
             }
         }
     
@@ -4554,9 +5146,12 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         const dynamicFar = (800 + Math.max(0, playerGrp.position.y - 300.0) * 2.2) / params.fogIntensity;
         const dynamicNear = (10 + Math.max(0, playerGrp.position.y - 300.0) * 0.4) / params.fogIntensity;
         
-        if (params.sceneFog) {
+        if (params.sceneFog && params.showFog !== false) {
             scene.fog.far += (dynamicFar - scene.fog.far) * dt * 2.0;
             scene.fog.near += (dynamicNear - scene.fog.near) * dt * 2.0;
+        } else {
+            scene.fog.near = 100000;
+            scene.fog.far = 200000;
         }
 
         const altitude = Math.max(0, playerGrp.position.y - currentGroundY);
@@ -4628,7 +5223,13 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
 
         if (typeof biplaneAudio !== 'undefined' && biplaneAudio) {
             const currentSpeed = playerPhysics ? playerPhysics.velocity : 18.0;
-            biplaneAudio.update(dt, isBoosting, isBraking, isFlightPaused, currentSpeed);
+            const isBoosting = typeof isBoosted !== 'undefined' ? isBoosted : false;
+            const isBraking = typeof isBrakingActive !== 'undefined' ? isBrakingActive : false;
+            const isFlightPaused = typeof isPaused !== 'undefined' ? isPaused : false;
+            const camDist = cameraManager ? cameraManager.cameraZoomDist : 12.0;
+            const turnRate = playerPhysics ? (playerPhysics.targetRoll || 0) : 0;
+            const pitchRate = playerPhysics ? (playerPhysics.targetPitch || 0) : 0;
+            biplaneAudio.update(dt, isBoosting, isBraking, isFlightPaused, currentSpeed, camDist, turnRate, pitchRate);
         }
 
         // Deep clouds track player (Removed)
@@ -4685,6 +5286,14 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             } else {
                 godRaysPass.uniforms.uSunVisible.value = 0.0;
             }
+
+            // uSunVisible already goes to 0 at night, off-screen and behind the camera, but
+            // multiplying by it does not stop the 24-sample loop from running. Drop the node
+            // out of the graph instead. Asymmetric thresholds give hysteresis so a sun sitting
+            // exactly on the horizon cannot thrash the shader recompile every frame.
+            const _rayVis = godRaysPass.uniforms.uSunVisible.value;
+            if (_rayVis > 0.01) setGodRaySunVisible(true);
+            else if (_rayVis < 0.001) setGodRaySunVisible(false);
         }
 
         if (typeof scenePass !== 'undefined' && scenePass) {
@@ -4698,12 +5307,19 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
+        // Re-derive the pixel budget: dragging onto a 4K monitor must not quadruple the
+        // framebuffer. setSize() alone never re-evaluated pixel ratio.
+        if (params.autoResolution) applyRenderBudget(adaptiveRes.scale);
         if (composer && typeof composer.setSize === 'function') {
             composer.setSize(window.innerWidth, window.innerHeight);
         }
     });
     const timeToggleBtn = document.getElementById('time-toggle');
-    const timeIcons = ['☀️', '🌇', '🌙'];
+    const timeIcons = [
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"/></svg>',
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 14a5 5 0 0 0-10 0"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="4.22" y1="6.22" x2="6.34" y2="8.34"/><line x1="19.78" y1="6.22" x2="17.66" y2="8.34"/><line x1="2" y1="18" x2="22" y2="18"/><line x1="5" y1="22" x2="19" y2="22"/></svg>',
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>'
+    ];
     const timeNames = ['Day', 'Dusk', 'Twilight'];
     
     function setTimePhase(phase) {
@@ -4712,7 +5328,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             params.sunAltitude = envConfigs[timePhase].sunY;
         }
         if (timeToggleBtn) {
-            timeToggleBtn.innerText = timeIcons[timePhase];
+            timeToggleBtn.innerHTML = timeIcons[timePhase];
             timeToggleBtn.title = `Current: ${timeNames[timePhase]} (Click to cycle)`;
         }
         localStorage.setItem('wl_timePhase', timePhase);
@@ -4725,7 +5341,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     window.setTimePhase = setTimePhase;
 
     if (timeToggleBtn) {
-        timeToggleBtn.innerText = timeIcons[timePhase] || '☀️';
+        timeToggleBtn.innerHTML = timeIcons[timePhase] || timeIcons[0];
         timeToggleBtn.title = `Current: ${timeNames[timePhase] || 'Day'} (Click to cycle)`;
 
         timeToggleBtn.addEventListener('click', () => {
@@ -4785,8 +5401,10 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     // ==========================================
     // 10. PROCEDURAL AMBIENT MUSIC
     // ==========================================
-    let musicGain, reverbNode;
+    let musicGain;
     let isMusicPlaying = false;
+    let isAutoAdvance = true;
+    let loopsPerTrack = 3;
     let currentTrack = 0;
     let nextNoteTime = 0;
     let musicTimerID;
@@ -4795,112 +5413,32 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     let sequenceTime = 0;
     let arpIndex = 0;
 
-    const tracks = [
-        { 
-            name: "Spirited Winds", 
-            chords: [
-                [174.61, 220.00, 261.63, 329.63], // Fmaj7
-                [196.00, 246.94, 293.66, 349.23], // G7
-                [164.81, 196.00, 246.94, 293.66], // Em7
-                [220.00, 261.63, 329.63, 392.00]  // Am7
-            ],
-            speed: 2400, 
-            stepSpeed: 300,
-            padOsc: 'triangle',
-            leadOsc: 'sine'
-        },
-        { 
-            name: "Summer Clouds", 
-            chords: [
-                [261.63, 329.63, 392.00, 493.88], // Cmaj7
-                [196.00, 246.94, 293.66, 392.00], // G
-                [220.00, 261.63, 329.63, 392.00], // Am7
-                [174.61, 220.00, 261.63, 329.63]  // Fmaj7
-            ],
-            speed: 3200, 
-            stepSpeed: 400,
-            padOsc: 'sawtooth',
-            leadOsc: 'triangle'
-        },
-        { 
-            name: "Evening Whispers", 
-            chords: [
-                [220.00, 261.63, 329.63, 493.88], // Am9
-                [174.61, 220.00, 261.63, 392.00], // Fmaj9
-                [261.63, 329.63, 392.00, 493.88], // Cmaj7
-                [164.81, 207.65, 246.94, 293.66]  // E7
-            ],
-            speed: 2800, 
-            stepSpeed: 350,
-            padOsc: 'sine',
-            leadOsc: 'sine'
-        },
-        { 
-            name: "Wandering Spirits", 
-            chords: [
-                [261.63, 329.63, 392.00, 523.25], // C
-                [174.61, 220.00, 261.63, 349.23], // F
-                [196.00, 246.94, 293.66, 392.00], // G
-                [220.00, 261.63, 329.63, 440.00]  // Am
-            ],
-            speed: 2000, 
-            stepSpeed: 250,
-            padOsc: 'triangle',
-            leadOsc: 'triangle'
-        },
-        { 
-            name: "Star Ocean", 
-            chords: [
-                [293.66, 369.99, 440.00, 554.37], // Dmaj7
-                [220.00, 277.18, 329.63, 415.30], // Amaj7
-                [246.94, 293.66, 369.99, 440.00], // Bm7
-                [196.00, 246.94, 293.66, 369.99]  // Gmaj7
-            ],
-            speed: 4000, 
-            stepSpeed: 500,
-            padOsc: 'sine',
-            leadOsc: 'triangle'
-        },
-        { 
-            name: "Floating Islands", 
-            chords: [
-                [207.65, 261.63, 311.13, 392.00], // Abmaj7
-                [233.08, 293.66, 349.23, 440.00], // Bbmaj7
-                [261.63, 329.63, 392.00, 493.88], // Cmaj7
-                [261.63, 329.63, 392.00, 493.88]  // Cmaj7 (held)
-            ],
-            speed: 4500, 
-            stepSpeed: 500,
-            padOsc: 'triangle',
-            leadOsc: 'sine'
-        },
-        { 
-            name: "Mystic Journey", 
-            chords: [
-                [196.00, 233.08, 293.66, 349.23], // Gm7
-                [174.61, 220.00, 261.63, 329.63], // Fmaj7
-                [155.56, 196.00, 233.08, 293.66], // Ebmaj7
-                [146.83, 185.00, 220.00, 293.66]  // D7
-            ],
-            speed: 3600, 
-            stepSpeed: 450,
-            padOsc: 'sine',
-            leadOsc: 'triangle'
-        },
-        { 
-            name: "Gentle Breeze", 
-            chords: [
-                [329.63, 415.30, 493.88, 622.25], // Emaj7
-                [277.18, 349.23, 415.30, 554.37], // Dbmaj7
-                [246.94, 311.13, 369.99, 493.88], // Bmaj7
-                [220.00, 277.18, 329.63, 440.00]  // Amaj7
-            ],
-            speed: 3000, 
-            stepSpeed: 300,
-            padOsc: 'sine',
-            leadOsc: 'sine'
+    let isSyncingTrack = false;
+    function selectMusicTrack(idx) {
+        if (isSyncingTrack) return;
+        isSyncingTrack = true;
+        try {
+            currentTrack = ((idx % tracks.length) + tracks.length) % tracks.length;
+            sequenceTime = 0;
+            chordIndex = 0;
+            arpIndex = 0;
+            if (audioCtx) {
+                nextNoteTime = audioCtx.currentTime + 0.1;
+            }
+            const trackBtn = document.getElementById('track-toggle');
+            if (trackBtn) {
+                trackBtn.innerText = "Track: " + tracks[currentTrack].name;
+            }
+            if (typeof trackDropdownController !== 'undefined' && trackDropdownController) {
+                if (trackDropdownController.getValue() !== tracks[currentTrack].name) {
+                    trackDropdownController.setValue(tracks[currentTrack].name);
+                }
+            }
+        } finally {
+            isSyncingTrack = false;
         }
-    ];
+    }
+    window.selectMusicTrack = selectMusicTrack;
 
     const arpPatterns = [
         [0, 1, 2, 3, 2, 1],
@@ -4909,18 +5447,44 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         [1, 2, 3, 2]
     ];
 
-    function createReverb() {
-        const length = audioCtx.sampleRate * (LOW_GFX ? 0.5 : 4); 
-        const impulse = audioCtx.createBuffer(2, length, audioCtx.sampleRate);
-        for (let i = 0; i < 2; i++) {
-            const channel = impulse.getChannelData(i);
-            for (let j = 0; j < length; j++) {
-                channel[j] = (Math.random() * 2 - 1) * Math.pow(1 - j / length, 3);
-            }
-        }
-        const convolver = audioCtx.createConvolver();
-        convolver.buffer = impulse;
-        return convolver;
+    let spaceReverb;
+
+    function createSpaceReverb() {
+        if (!audioCtx) return null;
+        const input = audioCtx.createGain();
+        const output = audioCtx.createGain();
+
+        const delayL = audioCtx.createDelay(1.0);
+        const delayR = audioCtx.createDelay(1.0);
+        delayL.delayTime.value = 0.38;
+        delayR.delayTime.value = 0.53;
+
+        const filterL = audioCtx.createBiquadFilter();
+        const filterR = audioCtx.createBiquadFilter();
+        filterL.type = 'lowpass';
+        filterR.type = 'lowpass';
+        filterL.frequency.value = 1200;
+        filterR.frequency.value = 1000;
+
+        const feedbackL = audioCtx.createGain();
+        const feedbackR = audioCtx.createGain();
+        feedbackL.gain.value = 0.42;
+        feedbackR.gain.value = 0.38;
+
+        input.connect(delayL);
+        input.connect(delayR);
+
+        delayL.connect(filterL);
+        filterL.connect(feedbackL);
+        feedbackL.connect(delayR);
+        filterL.connect(output);
+
+        delayR.connect(filterR);
+        filterR.connect(feedbackR);
+        feedbackR.connect(delayL);
+        filterR.connect(output);
+
+        return { input, output };
     }
 
     function playNote(freq, time, duration, oscType, isPad = false) {
@@ -4949,6 +5513,14 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         osc.connect(filter);
         filter.connect(env);
         env.connect(musicGain);
+
+        osc.onended = () => {
+            try {
+                osc.disconnect();
+                filter.disconnect();
+                env.disconnect();
+            } catch (e) {}
+        };
         
         osc.start(time);
         osc.stop(time + duration);
@@ -4999,9 +5571,14 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
                 sequenceTime = 0;
                 chordIndex++;
                 arpIndex = 0;
+
+                // Auto-advance to next track when progression completes loopsPerTrack loops
+                if (isAutoAdvance && chordIndex >= track.chords.length * loopsPerTrack) {
+                    selectMusicTrack(currentTrack + 1);
+                }
             }
         }
-        musicTimerID = setTimeout(scheduleNotes, 50);
+        musicTimerID = setTimeout(scheduleNotes, 80);
     }
 
     document.getElementById('music-toggle').addEventListener('click', () => {
@@ -5010,38 +5587,48 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         
         if (!musicGain) {
             musicGain = audioCtx.createGain();
-            musicGain.gain.value = 0.5;
-            reverbNode = createReverb();
-            musicGain.connect(reverbNode);
-            reverbNode.connect(audioCtx.destination);
+            musicGain.gain.value = 0.45;
+            spaceReverb = createSpaceReverb();
             musicGain.connect(audioCtx.destination);
+            if (spaceReverb) {
+                const wetGain = audioCtx.createGain();
+                wetGain.gain.value = 0.55;
+                musicGain.connect(spaceReverb.input);
+                spaceReverb.output.connect(wetGain);
+                wetGain.connect(audioCtx.destination);
+            }
         }
 
         isMusicPlaying = !isMusicPlaying;
         const trackBtn = document.getElementById('track-toggle');
+        const topMusicBtn = document.getElementById('top-music-btn');
         if (isMusicPlaying) {
             sequenceTime = 0;
             chordIndex = 0;
             arpIndex = 0;
             nextNoteTime = audioCtx.currentTime + 0.1;
             scheduleNotes();
-            document.getElementById('music-toggle').innerText = "⏸ Music";
+            document.getElementById('music-toggle').innerText = "Pause Music";
             trackBtn.style.display = "block";
+            if (topMusicBtn) {
+                topMusicBtn.style.opacity = '1';
+                topMusicBtn.style.color = '#60a5fa';
+                topMusicBtn.title = 'Music: PLAYING (Click to Pause)';
+            }
         } else {
             clearTimeout(musicTimerID);
-            document.getElementById('music-toggle').innerText = "▶ Music";
+            document.getElementById('music-toggle').innerText = "Play Music";
             trackBtn.style.display = "none";
+            if (topMusicBtn) {
+                topMusicBtn.style.opacity = '0.65';
+                topMusicBtn.style.color = 'rgba(255, 255, 255, 0.95)';
+                topMusicBtn.title = 'Music: PAUSED (Click to Play)';
+            }
         }
     });
 
-    document.getElementById('track-toggle').addEventListener('click', () => {
-        currentTrack = (currentTrack + 1) % tracks.length;
-        document.getElementById('track-toggle').innerText = "Track: " + tracks[currentTrack].name;
-        
-        sequenceTime = 0;
-        chordIndex = 0;
-        arpIndex = 0;
-        nextNoteTime = audioCtx.currentTime + 0.1;
+    document.getElementById('track-toggle')?.addEventListener('click', () => {
+        selectMusicTrack(currentTrack + 1);
     });
 
     window.addEventListener('keydown', initAudio, { once: true });
@@ -5370,9 +5957,11 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         };
 
         const moonFolder = envFolder.addFolder('Moonlight & Night');
-        moonFolder.add(params, 'exposure', 0.5, 4.0, 0.1).name('Global Brightness').onChange(v => {
-            renderer.toneMappingExposure = v;
-        });
+        // NOTE: this used to write renderer.toneMappingExposure, which is completely inert
+        // while PostProcessing sets outputColorTransform = false. It now drives the real
+        // exposure multiplier, so the slider actually does something.
+        moonFolder.add(params, 'exposureTrim', 0.4, 2.0, 0.02).name('Global Brightness');
+        moonFolder.add(params, 'nightExposure', 0.6, 3.0, 0.05).name('Night Exposure');
         moonFolder.addColor(moonParams, 'moonlightColor').name('Moonlight Color').onChange(v => envConfigs[2].dir = parseInt(v.replace('#',''), 16));
         moonFolder.add(moonParams, 'moonlightIntensity', 0, 10, 0.1).name('Moonlight Power').onChange(v => envConfigs[2].dirI = v);
         moonFolder.addColor(moonParams, 'nightAmbColor').name('Night Fill Color').onChange(v => envConfigs[2].amb = parseInt(v.replace('#',''), 16));
@@ -5381,12 +5970,77 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         moonFolder.addColor(moonParams, 'nightFogColor').name('Night Fog Color').onChange(v => envConfigs[2].fog = parseInt(v.replace('#',''), 16));
         moonFolder.add(moonParams, 'moonAltitude', 200, 4000, 50).name('Moon Altitude').onChange(v => envConfigs[2].moonY = v);
 
+        // Star controls. Every one of these is multiplied by uNightFactor in the shader, which
+        // is exactly 0.0 at dusk — so no setting here can affect the golden dusk look.
+        if (skyUniforms && skyUniforms.uStarDensity) {
+            const starParams = {
+                starDensity: skyUniforms.uStarDensity.value,
+                starBrightness: skyUniforms.uStarBrightness.value,
+                starTwinkle: skyUniforms.uStarTwinkle.value,
+                milkyWay: skyUniforms.uMilkyWay.value,
+                nightSkyLift: skyUniforms.uNightSkyLift.value
+            };
+            moonFolder.add(starParams, 'starDensity', 0.0, 0.25, 0.005).name('Star Density').onChange(v => skyUniforms.uStarDensity.value = v);
+            moonFolder.add(starParams, 'starBrightness', 0.0, 3.0, 0.05).name('Star Brightness').onChange(v => skyUniforms.uStarBrightness.value = v);
+            moonFolder.add(starParams, 'starTwinkle', 0.0, 1.0, 0.05).name('Star Twinkle').onChange(v => skyUniforms.uStarTwinkle.value = v);
+            moonFolder.add(starParams, 'nightSkyLift', 0.0, 3.0, 0.05).name('Night Sky Lift').onChange(v => skyUniforms.uNightSkyLift.value = v);
+
+            const mwFolder = moonFolder.addFolder('Milky Way');
+            const mwParams = {
+                strength: skyUniforms.uMilkyWay.value,
+                dust: skyUniforms.uMilkyDust.value,
+                armColor: '#' + new THREE.Color().copy(skyUniforms.uMilkyArmColor.value).getHexString(),
+                coreColor: '#' + new THREE.Color().copy(skyUniforms.uMilkyCoreColor.value).getHexString()
+            };
+            mwFolder.add(mwParams, 'strength', 0.0, 3.0, 0.05).name('Strength').onChange(v => skyUniforms.uMilkyWay.value = v);
+            mwFolder.add(mwParams, 'dust', 0.0, 1.0, 0.05).name('Dust Lanes').onChange(v => skyUniforms.uMilkyDust.value = v);
+            mwFolder.addColor(mwParams, 'armColor').name('Arm Color').onChange(v => skyUniforms.uMilkyArmColor.value.set(v));
+            mwFolder.addColor(mwParams, 'coreColor').name('Core Color').onChange(v => skyUniforms.uMilkyCoreColor.value.set(v));
+        }
+
+        // Photographic Milky Way cubemap (extracted from galactic-home). Night-only:
+        // its opacity is uNightFactor * opacity, and uNightFactor is exactly 0 at dusk,
+        // so none of these controls can touch the locked Golden Hour Dusk look.
+        if (typeof milkyWayParams !== 'undefined') {
+            const mwPhoto = moonFolder.addFolder('Milky Way Photo');
+            mwPhoto.add(milkyWayParams, 'brightness', 0.0, 4.0, 0.05).name('Brightness');
+            mwPhoto.add(milkyWayParams, 'opacity', 0.0, 1.0, 0.05).name('Opacity');
+            mwPhoto.add(milkyWayParams, 'tiltX', -180, 180, 1).name('Elevation (tip up/down)').onChange(applyMilkyWayTilt);
+            mwPhoto.add(milkyWayParams, 'tiltY', -180, 180, 1).name('Azimuth (spin L/R)').onChange(applyMilkyWayTilt);
+            mwPhoto.add(milkyWayParams, 'tiltZ', -180, 180, 1).name('Roll').onChange(applyMilkyWayTilt);
+        }
+        if (typeof auroraParams !== 'undefined') {
+            const auroraFolder = moonFolder.addFolder('Aurora Borealis');
+            auroraFolder.add(auroraParams, 'opacity', 0.0, 1.0, 0.05).name('Opacity');
+            auroraFolder.add(auroraParams, 'intensity', 0.0, 3.0, 0.1).name('Intensity');
+            auroraFolder.add(auroraParams, 'speed', 0.1, 4.0, 0.1).name('Speed');
+            auroraFolder.add(auroraParams, 'altitude', -2000, 8000, 100).name('Altitude');
+        }
+
+        // 4b. Daylight Subfolder — day was blown out because near-white light at high
+        // intensity pushed every channel over the soft-clip knee at once.
+        const dayParams = {
+            dayLightColor: '#' + envConfigs[0].dir.toString(16).padStart(6, '0'),
+            dayLightIntensity: envConfigs[0].dirI,
+            dayAmbColor: '#' + envConfigs[0].amb.toString(16).padStart(6, '0'),
+            dayAmbIntensity: envConfigs[0].ambI,
+            daySkyColor: '#' + envConfigs[0].bg.toString(16).padStart(6, '0'),
+            dayFogColor: '#' + envConfigs[0].fog.toString(16).padStart(6, '0')
+        };
+        const dayFolder = envFolder.addFolder('Daylight');
+        dayFolder.add(params, 'dayExposure', 0.25, 1.5, 0.01).name('Day Exposure');
+        dayFolder.addColor(dayParams, 'dayLightColor').name('Sunlight Color').onChange(v => envConfigs[0].dir = parseInt(v.replace('#',''), 16));
+        dayFolder.add(dayParams, 'dayLightIntensity', 0, 5, 0.05).name('Sunlight Power').onChange(v => envConfigs[0].dirI = v);
+        dayFolder.addColor(dayParams, 'dayAmbColor').name('Day Fill Color').onChange(v => envConfigs[0].amb = parseInt(v.replace('#',''), 16));
+        dayFolder.add(dayParams, 'dayAmbIntensity', 0, 3, 0.05).name('Day Fill Power').onChange(v => envConfigs[0].ambI = v);
+        dayFolder.addColor(dayParams, 'daySkyColor').name('Day Sky Color').onChange(v => envConfigs[0].bg = parseInt(v.replace('#',''), 16));
+        dayFolder.addColor(dayParams, 'dayFogColor').name('Day Fog Color').onChange(v => envConfigs[0].fog = parseInt(v.replace('#',''), 16));
+
         // 5. Weather & Fog Subfolder
         const weatherFolder = envFolder.addFolder('Weather & Fog');
-        weatherFolder.add(params, 'sceneFog').name('Global Fog').onChange(v => {
-            if (!v && typeof scene !== 'undefined' && scene.fog) {
-                scene.fog.near = 100000;
-                scene.fog.far = 200000;
+        weatherFolder.add(params, 'sceneFog').name('Global Fog').listen().onChange(v => {
+            if (typeof setAllFogEnabled === 'function') {
+                setAllFogEnabled(v);
             }
         });
         weatherFolder.add(params, 'fogIntensity', 0.1, 5.0, 0.1).name('Fog Intensity');
@@ -5797,10 +6451,9 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
 
         // Reorder folders: most-used first
         const folderOrder = [
-            flightFolder, audioFolder, debugFolder, navFolder, perfFolder, envFolder,
-            editorFolder, presetsFolder
+            flightFolder, editorFolder, audioFolder, debugFolder, navFolder, perfFolder, envFolder, presetsFolder
         ].filter(Boolean);
-        const guiContainer = gui.domElement.querySelector('.children') || gui.domElement;
+        const guiContainer = gui.$children || gui.domElement.querySelector('.children') || gui.domElement;
         folderOrder.forEach(f => {
             const dom = f.domElement || f;
             if (dom && dom.parentElement) guiContainer.appendChild(dom);
@@ -5832,6 +6485,20 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
     }
     async function start() {
         initPostProcessing();
-        renderer.setAnimationLoop(animate);
+        // animate() is async, so a throw inside it becomes an unhandled rejection that the
+        // console swallows silently and the frame just stops updating with no visible error.
+        // Surface it once instead of losing it.
+        let _animErrorLogged = false;
+        const _reportAnimError = (e) => {
+            if (_animErrorLogged) return;
+            _animErrorLogged = true;
+            console.error('[Wanderlust] render loop error:', e);
+        };
+        renderer.setAnimationLoop((t, f) => {
+            try {
+                const rv = animate(t, f);
+                if (rv && rv.catch) rv.catch(_reportAnimError);
+            } catch (e) { _reportAnimError(e); }
+        });
     }
     start();

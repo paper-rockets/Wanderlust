@@ -5,7 +5,7 @@ export const FLIGHT_MODELS = [
     {
         id: 'kiki',
         name: 'Kiki (Broomstick)',
-        file: 'flight_models/kiki-lowpoly.glb',
+        file: 'flight_models/kiki-draco.glb',
         rotX: 0,
         rotY: 180,
         rotZ: 0,
@@ -26,15 +26,39 @@ export const FLIGHT_MODELS = [
         isPlane: true
     },
     {
-        id: 'porco_rosso',
-        name: 'Porco Rosso (Seaplane)',
-        file: 'flight_models/porco_rosso_-_seaplane.glb',
+        id: 'sopwith_pup',
+        name: 'Sopwith Pup (Biplane)',
+        file: 'flight_models/sopwith_pup_stylized_-_cupido.glb',
+        rotX: 0,
+        rotY: 0,
+        rotZ: 0,
+        scale: 1.6,
+        offsetY: 0,
+        anim: 'Take 001',
+        isPlane: true
+    },
+    {
+        id: 'psx_saviola_s21',
+        name: 'Savoia S.21 (PSX)',
+        file: 'flight_models/psx_saviola_s21.glb',
         rotX: 0,
         rotY: 180,
         rotZ: 0,
         scale: 1.6,
         offsetY: 0,
-        anim: 'PropellerAction',
+        anim: 'Saviola flight',
+        isPlane: true
+    },
+    {
+        id: 'sikorski_s16',
+        name: 'Sikorsky S-16',
+        file: 'flight_models/sikorski_s-16__flying_circus_dae_assignment.glb',
+        rotX: 0,
+        rotY: 180,
+        rotZ: 0,
+        scale: 1.6,
+        offsetY: 0,
+        anim: 'Scene',
         isPlane: true
     },
     {
@@ -85,7 +109,7 @@ export const FLIGHT_MODELS = [
         id: 'scarlet_macaw',
         name: 'Scarlet Macaw',
         file: 'flight_models/animated_parrot.glb',
-        rotX: -30,
+        rotX: 0,
         rotY: 180,
         rotZ: 0,
         scale: 1.6,
@@ -108,7 +132,7 @@ export const FLIGHT_MODELS = [
         name: 'Blue Morpho Butterfly',
         file: 'flight_models/borboleta_azul_-_butterfly.glb',
         rotX: 0,
-        rotY: -90,
+        rotY: 270,
         rotZ: 0,
         scale: 2.2,
         offsetY: 0,
@@ -126,25 +150,14 @@ export const FLIGHT_MODELS = [
         anim: 'Take 001'
     },
     {
-        id: 'tropical_parrot',
-        name: 'Tropical Parrot',
-        file: 'flight_models/parrot_ai.glb',
-        rotX: -25,
-        rotY: 90,
-        rotZ: 0,
-        scale: 1.6,
-        offsetY: 0,
-        anim: 'Object_0'
-    },
-    {
-        id: 'quetzal',
-        name: 'Resplendent Quetzal',
-        file: 'flight_models/quetzal_animation__texture_test.glb',
+        id: 'charizard',
+        name: 'Charizard (Dragon)',
+        file: 'flight_models/charizard_flying_animation.glb',
         rotX: 0,
         rotY: 180,
         rotZ: 0,
-        scale: 1.6,
+        scale: 1.8,
         offsetY: 0,
-        anim: 'Take 001'
+        anim: 'Flying'
     }
 ];

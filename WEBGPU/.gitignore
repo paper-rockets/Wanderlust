@@ -6,3 +6,13 @@ coverage/
 *.log
 .env*
 !.env.example
+paseo-antigravity-runner/
+scratch/
+agent_status.json
+agent_approval_*.json
+agent_execution.log
+_shoreviz.mjs
+public/assets/skybox/Untitled-1.png
+__pycache__/
+*.pyc
+*.pyo
