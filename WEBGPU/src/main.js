@@ -89,8 +89,7 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             }
         }
     });
-    let cameraZoomDist = parseFloat(localStorage.getItem('wl_zoomDist')) || (deviceTier === 'mobile' ? 22.0 : 12.0);
-    if (deviceTier === 'mobile' && cameraZoomDist < 14.0) cameraZoomDist = 22.0;
+    let cameraZoomDist = parseFloat(localStorage.getItem('wl_zoomDist')) || 12.0;
     let currentFrame = 0;
     let logicTimer = 0;
     let animeWaterSystem = null;
@@ -3757,9 +3756,9 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         if (charBtn) {
             charBtn.innerText = `MODEL: ${cfg.name.toUpperCase()}`;
         }
-        const topModelSelect = document.getElementById('top-model-select');
-        if (topModelSelect && topModelSelect.value !== cfg.id) {
-            topModelSelect.value = cfg.id;
+        const topModelDisplay = document.getElementById('top-model-display');
+        if (topModelDisplay) {
+            topModelDisplay.textContent = cfg.name;
         }
         if (typeof flightModelDropdownController !== 'undefined' && flightModelDropdownController) {
             if (flightModelDropdownController.getValue() !== cfg.id) {
@@ -3875,28 +3874,20 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
         document.getElementById('music-toggle')?.click();
     });
 
-    // Top Bar Model Switcher UI Initialization
-    const topModelSelect = document.getElementById('top-model-select');
+    // Top Bar Minimal Model Switcher UI Initialization
+    const topModelDisplay = document.getElementById('top-model-display');
     const topModelPrev = document.getElementById('top-model-prev-btn');
     const topModelNext = document.getElementById('top-model-next-btn');
 
-    if (topModelSelect) {
-        topModelSelect.innerHTML = '';
-        FLIGHT_MODELS.forEach(m => {
-            const opt = document.createElement('option');
-            opt.value = m.id;
-            opt.textContent = m.name;
-            topModelSelect.appendChild(opt);
-        });
+    if (topModelDisplay && initCfg) {
+        topModelDisplay.textContent = initCfg.name;
+    }
 
-        if (initCfg) {
-            topModelSelect.value = initCfg.id;
-        }
-
-        topModelSelect.addEventListener('change', (e) => {
-            const id = e.target.value;
+    if (topModelDisplay) {
+        topModelDisplay.addEventListener('click', (e) => {
+            e.stopPropagation();
             if (typeof flightModelManager !== 'undefined' && flightModelManager) {
-                flightModelManager.setModelById(id);
+                flightModelManager.nextModel();
             }
         });
     }
@@ -4610,9 +4601,8 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             const dy = e.touches[0].clientY - e.touches[1].clientY;
             const newDist = Math.sqrt(dx*dx + dy*dy);
             
-            cameraZoomDist = initialZoomDist * (newDist / initialPinchDist);
-            const mobileZoomMin = deviceTier === 'mobile' ? 12.0 : 5.0;
-            cameraZoomDist = Math.max(mobileZoomMin, Math.min(300.0, cameraZoomDist));
+            cameraZoomDist = initialZoomDist * (initialPinchDist / newDist);
+            cameraZoomDist = Math.max(5.0, Math.min(300.0, cameraZoomDist));
             localStorage.setItem('wl_zoomDist', cameraZoomDist);
 
             const zoomToggleBtn = document.getElementById('zoom-toggle');
