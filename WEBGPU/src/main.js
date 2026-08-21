@@ -89,7 +89,8 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             }
         }
     });
-    let cameraZoomDist = parseFloat(localStorage.getItem('wl_zoomDist')) || 12.0;
+    let cameraZoomDist = parseFloat(localStorage.getItem('wl_zoomDist')) || (deviceTier === 'mobile' ? 22.0 : 12.0);
+    if (deviceTier === 'mobile' && cameraZoomDist < 14.0) cameraZoomDist = 22.0;
     let currentFrame = 0;
     let logicTimer = 0;
     let animeWaterSystem = null;
@@ -4589,8 +4590,9 @@ import { postProcessing as composer, scenePass, initPostProcessing, bloomPass, g
             const dy = e.touches[0].clientY - e.touches[1].clientY;
             const newDist = Math.sqrt(dx*dx + dy*dy);
             
-            cameraZoomDist = initialZoomDist * (initialPinchDist / newDist);
-            cameraZoomDist = Math.max(5.0, Math.min(300.0, cameraZoomDist));
+            cameraZoomDist = initialZoomDist * (newDist / initialPinchDist);
+            const mobileZoomMin = deviceTier === 'mobile' ? 12.0 : 5.0;
+            cameraZoomDist = Math.max(mobileZoomMin, Math.min(300.0, cameraZoomDist));
             localStorage.setItem('wl_zoomDist', cameraZoomDist);
 
             const zoomToggleBtn = document.getElementById('zoom-toggle');
